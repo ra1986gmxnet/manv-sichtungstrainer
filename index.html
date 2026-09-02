@@ -6,8 +6,23 @@
 <title>mSTaRT Sichtungstrainer</title>
 <!-- Firebase (Firestore) – kostenlose Datenbank für den Online-Betrieb.
      Siehe DEPLOYMENT.md, Schritt 2, wie du dein eigenes Firebase-Projekt anlegst. -->
-<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script>// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyBHcG5nXpqxoIRsSAsruH7CslwbrhzPVaY",
+  authDomain: "manv-sichtungstrainer.firebaseapp.com",
+  projectId: "manv-sichtungstrainer",
+  storageBucket: "manv-sichtungstrainer.firebasestorage.app",
+  messagingSenderId: "175542139942",
+  appId: "1:175542139942:web:43add6cb59e21da4b53ae7"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);</script>
 <style>
   :root{
     --red:#E2231A;
