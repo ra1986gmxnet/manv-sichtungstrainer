@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -6,23 +7,9 @@
 <title>mSTaRT Sichtungstrainer</title>
 <!-- Firebase (Firestore) – kostenlose Datenbank für den Online-Betrieb.
      Siehe DEPLOYMENT.md, Schritt 2, wie du dein eigenes Firebase-Projekt anlegst. -->
-<script>// Import the functions you need from the SDKs you need
-import { initializeApp } from "firebase/app";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
-
-// Your web app's Firebase configuration
-const firebaseConfig = {
-  apiKey: "AIzaSyBHcG5nXpqxoIRsSAsruH7CslwbrhzPVaY",
-  authDomain: "manv-sichtungstrainer.firebaseapp.com",
-  projectId: "manv-sichtungstrainer",
-  storageBucket: "manv-sichtungstrainer.firebasestorage.app",
-  messagingSenderId: "175542139942",
-  appId: "1:175542139942:web:43add6cb59e21da4b53ae7"
-};
-
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);</script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
   :root{
     --red:#E2231A;
@@ -237,7 +224,10 @@ const St = {
   cockpitLog:[],
   aiBusy:false,
   aiProgress:'',
-  aiLastError:null
+  aiLastError:null,
+  pendingDeepLink:null,
+  deepLinkPatientAfterJoin:null,
+  qrExerciseId:null
 };
 
 const CATS = ['rot','gelb','gruen','blau','schwarz'];
@@ -266,6 +256,12 @@ function clearSessionHash(){
 }
 
 async function init(){
+  // QR-Code-Deep-Link aus der URL lesen (z.B. ?ex=abc123&pid=5), bevor irgendetwas anderes passiert.
+  const params = new URLSearchParams(location.search);
+  if(params.get('ex') && params.get('pid')){
+    St.pendingDeepLink = {exId: params.get('ex'), pid: parseInt(params.get('pid'))};
+  }
+
   St.users = await loadKey('users', null);
   if(!St.users){
     St.users = {
@@ -296,7 +292,31 @@ async function init(){
       clearSessionHash();
     }
   }
+
+  if(St.user){ tryHandleDeepLink(); }
   render();
+}
+
+// Prüft, ob ein QR-Deep-Link ansteht, und öffnet ggf. direkt die passende Sichtungsseite
+// (bzw. zuerst die Rollenauswahl, falls der Nutzer der Übung noch nicht beigetreten ist).
+function tryHandleDeepLink(){
+  if(!St.pendingDeepLink || !St.user) return false;
+  const {exId, pid} = St.pendingDeepLink;
+  const ex = St.exercises.find(e=>e.id===exId);
+  if(!ex){ toast('Übung aus dem QR-Code wurde nicht gefunden'); St.pendingDeepLink=null; return false; }
+  const patient = St.patients.find(p=>p.id===pid);
+  if(!patient){ toast('Patient aus dem QR-Code wurde nicht gefunden'); St.pendingDeepLink=null; return false; }
+  St.currentExerciseId = exId;
+  const myRole = ex.participants[St.user.username];
+  St.pendingDeepLink = null;
+  if(myRole){
+    St.currentRole = myRole;
+    openPatient(pid);
+  }else{
+    St.deepLinkPatientAfterJoin = pid;
+    openJoinModal(exId);
+  }
+  return true;
 }
 
 function seedPatients(){
@@ -355,7 +375,8 @@ async function doLogin(username, password){
   await saveKey('users', St.users);
   St.user = u;
   setSessionHash(u.username);
-  go(u.role==='admin' ? 'admin' : 'exercises');
+  const handled = tryHandleDeepLink();
+  if(!handled){ go(u.role==='admin' ? 'admin' : 'exercises'); }
 }
 
 async function doRegister(username, password, email){
@@ -432,7 +453,13 @@ async function joinExercise(exId, role){
   await saveKey('exercises', St.exercises);
   St.currentExerciseId = exId;
   St.currentRole = role;
-  go('patients');
+  if(St.deepLinkPatientAfterJoin){
+    const pid = St.deepLinkPatientAfterJoin;
+    St.deepLinkPatientAfterJoin = null;
+    openPatient(pid);
+  }else{
+    go('patients');
+  }
 }
 
 /* ====================== SICHTUNG ====================== */
@@ -441,7 +468,24 @@ function openPatient(pid){
   St.reveal = {};
   St.selectedBodyPart = null;
   stopTimer();
+  setPatientUrlParam(St.currentExerciseId, pid);
   go('sichtung');
+}
+function setPatientUrlParam(exId, pid){
+  try{
+    const url = new URL(location.href);
+    url.searchParams.set('ex', exId);
+    url.searchParams.set('pid', pid);
+    history.replaceState(null, '', url.pathname + url.search + location.hash);
+  }catch(e){}
+}
+function clearPatientUrlParam(){
+  try{
+    const url = new URL(location.href);
+    url.searchParams.delete('ex'); url.searchParams.delete('pid');
+    const q = url.search ? url.search : '';
+    history.replaceState(null, '', url.pathname + q + location.hash);
+  }catch(e){}
 }
 
 function selectBodyPart(key,label){
@@ -513,6 +557,75 @@ async function assignHospital(hospId){
 }
 
 /* ====================== ADMIN: PATIENTS ====================== */
+
+/* ---- QR-Codes ---- */
+// Baut die URL, die im QR-Code steckt: öffnet die App und springt (nach Login/Rollenwahl)
+// direkt zur Sichtungsseite dieses Patienten in der gewählten Übung.
+function patientQrUrl(exId, pid){
+  const base = location.origin + location.pathname;
+  return `${base}?ex=${encodeURIComponent(exId)}&pid=${pid}`;
+}
+// Erzeugt synchron ein PNG-Data-URL eines QR-Codes für den gegebenen Text.
+function qrDataUrl(text, size){
+  size = size || 220;
+  const tempDiv = document.createElement('div');
+  tempDiv.style.position='fixed'; tempDiv.style.left='-9999px';
+  document.body.appendChild(tempDiv);
+  let dataUrl = '';
+  try{
+    new QRCode(tempDiv, {text: text, width:size, height:size, correctLevel: QRCode.CorrectLevel.M});
+    const canvas = tempDiv.querySelector('canvas');
+    if(canvas) dataUrl = canvas.toDataURL('image/png');
+  }catch(e){ console.error('QR-Code Erzeugung fehlgeschlagen', e); }
+  document.body.removeChild(tempDiv);
+  return dataUrl;
+}
+function showPatientQr(pid){
+  if(!St.qrExerciseId){ toast('Bitte zuerst oben eine Übung für die QR-Codes auswählen'); return; }
+  const url = patientQrUrl(St.qrExerciseId, pid);
+  const img = qrDataUrl(url, 220);
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="text-align:center;">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>QR-Code Patient #${pid}</h2>
+      <img src="${img}" style="width:220px;height:220px;margin:10px 0;">
+      <p class="small" style="word-break:break-all;">${url}</p>
+      <button class="btn btn-primary" style="width:100%" onclick="exportQrPdf([${pid}])">Diesen QR-Code als PDF/Druck öffnen</button>
+    </div>
+  </div>`;
+  render();
+}
+// Öffnet ein Druckfenster mit einem QR-Code pro DIN-A4-Seite (patientIds=null -> alle Patienten).
+function exportQrPdf(patientIds){
+  if(!St.qrExerciseId){ toast('Bitte zuerst oben eine Übung für die QR-Codes auswählen'); return; }
+  const ex = St.exercises.find(e=>e.id===St.qrExerciseId);
+  const ids = patientIds || St.patients.map(p=>p.id);
+  const pages = ids.map(pid=>{
+    const url = patientQrUrl(St.qrExerciseId, pid);
+    const img = qrDataUrl(url, 300);
+    return `<div class="qrpage"><div class="qrbox">
+      <div class="qrid">Patient #${pid}</div>
+      <img src="${img}">
+      <div class="qrurl">${url}</div>
+    </div></div>`;
+  }).join('');
+  const html = `<html><head><meta charset="utf-8"><title>QR-Codes – ${ex?ex.name:''}</title>
+  <style>
+    @page{ size:A4; margin:0; }
+    body{ font-family:sans-serif; margin:0; }
+    .qrpage{ width:210mm; height:297mm; display:flex; align-items:center; justify-content:center;
+      page-break-after:always; box-sizing:border-box; }
+    .qrbox{ text-align:center; }
+    .qrbox img{ width:300px; height:300px; }
+    .qrid{ font-size:34px; font-weight:800; margin-bottom:18px; font-family:sans-serif; }
+    .qrurl{ font-size:11px; color:#666; margin-top:10px; word-break:break-all; max-width:340px; }
+  </style></head><body>${pages}</body></html>`;
+  const w = window.open('', '_blank');
+  w.document.write(html); w.document.close(); w.focus();
+  setTimeout(()=>w.print(), 300); // kurze Pause, damit alle Bilder sicher geladen sind
+}
+
 async function deletePatient(pid){
   St.patients = St.patients.filter(p=>p.id!==pid);
   await saveKey('patients', St.patients);
@@ -713,12 +826,26 @@ async function deleteUser(username){
   await saveKey('users', St.users);
   render();
 }
-async function resetPassword(username){
+function openSetPasswordModal(username){
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Neues Passwort für ${username}</h2>
+      <div class="field"><label>Neues Passwort</label><input id="np-pass" type="text" placeholder="Mindestens 3 Zeichen"></div>
+      <p class="small">Das Passwort wird sofort gesetzt. Da kein echter E-Mail-Versand möglich ist, teile es dem Nutzer bitte selbst mit.</p>
+      <button class="btn btn-primary" style="width:100%" onclick="setUserPassword('${username}', document.getElementById('np-pass').value)">Passwort setzen</button>
+    </div>
+  </div>`;
+  render();
+}
+async function setUserPassword(username, newPassword){
+  if(!newPassword || newPassword.length<3){ toast('Bitte ein Passwort mit mindestens 3 Zeichen eingeben'); return; }
   const u = St.users[username]; if(!u) return;
-  const newPw = Math.random().toString(36).slice(2,10);
-  u.password = newPw;
+  u.password = newPassword;
   await saveKey('users', St.users);
-  alert(`Simulierter E-Mail-Versand an ${u.email}:\n\nNeues Passwort für ${username}: ${newPw}\n\n(Da echter Mailversand in dieser Umgebung nicht möglich ist, wird das Passwort hier direkt angezeigt.)`);
+  toast('Passwort für '+username+' aktualisiert');
+  closeModal();
 }
 async function assignRole(username, role){
   const u = St.users[username]; if(!u) return;
@@ -934,7 +1061,13 @@ function viewPatients(){
   return `
   <div class="wrap">
     <h1>Patientenübersicht</h1>
-    <p>Rolle: <span class="badge-role">${St.currentRole}</span> — Patienten-ID eingeben / auswählen</p>
+    <p>Rolle: <span class="badge-role">${St.currentRole}</span></p>
+    <div class="card" style="background:var(--yellow-dim);border-color:var(--yellow);">
+      <h3 style="margin-top:0;">📷 QR-Code scannen</h3>
+      <p style="color:var(--ink);">Scanne den QR-Code neben dem Patienten auf dem Übungsgelände mit der
+      Kamera-App deines Smartphones — du gelangst dann direkt zur Sichtungsseite dieses Patienten.
+      Alternativ kannst du eine Patienten-ID auch manuell unten auswählen.</p>
+    </div>
     <div class="grid" style="margin-top:16px;">${tiles || '<div class="empty">Keine Patienten in der Datenbank</div>'}</div>
   </div>`;
 }
@@ -1030,7 +1163,7 @@ function viewSichtung(){
 
   return `
   <div class="wrap">
-    <button class="btn" onclick="stopTimer();go('patients')">← Zurück zur Patientenübersicht</button>
+    <button class="btn" onclick="stopTimer();clearPatientUrlParam();go('patients')">← Zurück zur Patientenübersicht</button>
     <div class="card" style="margin-top:14px;">
       <div class="flex-between">
         <div>
@@ -1133,6 +1266,9 @@ function viewAdmin(){
 }
 
 function adminPatients(){
+  // Wenn noch keine Übung für QR-Codes gewählt wurde, automatisch die erste vorhandene nehmen
+  if(!St.qrExerciseId && St.exercises.length){ St.qrExerciseId = St.exercises[0].id; }
+
   const genBox = `
   <div class="card">
     <h3>Neue Patienten per KI generieren</h3>
@@ -1159,6 +1295,21 @@ function adminPatients(){
     <p class="small">Feste Altersverteilung je Lauf: 5% Baby, 5% Kleinkind, 5% Schulkind, 85% Erwachsene. Feste Namensherkunft: 10% ausländisch, 90% deutsch.</p>
   </div>`;
 
+  const qrBox = `
+  <div class="card">
+    <h3>QR-Codes zum Sichten</h3>
+    <p class="small">Jeder Patient bekommt einen QR-Code, der Teilnehmer direkt zur Sichtungsseite führt.
+      Da eine Sichtung immer zu einer Übung gehört, wähle zuerst, für welche Übung die Codes gelten sollen.</p>
+    <div class="field">
+      <label>Übung für QR-Codes</label>
+      <select onchange="St.qrExerciseId=this.value;render()">
+        ${St.exercises.length ? St.exercises.map(ex=>`<option value="${ex.id}" ${St.qrExerciseId===ex.id?'selected':''}>${ex.name}</option>`).join('') : '<option value="">Keine Übung vorhanden</option>'}
+      </select>
+    </div>
+    <button class="btn btn-primary" ${!St.exercises.length?'disabled':''} onclick="exportQrPdf(null)">📄 PDF mit allen QR-Codes erzeugen (1 pro Seite)</button>
+    ${!St.exercises.length?'<p class="small">Lege zuerst unter "Übungen" eine Übung an.</p>':''}
+  </div>`;
+
   const rows = St.patients.map(p=>`
     <tr>
       <td>#${p.id}</td>
@@ -1167,10 +1318,11 @@ function adminPatients(){
       <td>${p.geschlecht}</td>
       <td><span class="tag tag-${p.kategorieReal}">${CAT_LABEL[p.kategorieReal]}</span></td>
       <td><button class="btn btn-sm" onclick="openPatientEdit(${p.id})">Bearbeiten</button>
+      <button class="btn btn-sm" ${!St.exercises.length?'disabled':''} onclick="showPatientQr(${p.id})">QR-Code</button>
       <button class="btn btn-sm btn-danger" onclick="deletePatient(${p.id})">Löschen</button></td>
     </tr>`).join('') || `<tr><td colspan="6" class="empty">Keine Patienten</td></tr>`;
 
-  return `${genBox}
+  return `${genBox}${qrBox}
   <div class="card">
     <h3>Patienten (${St.patients.length})</h3>
     <table><thead><tr><th>ID</th><th>Name</th><th>Alter</th><th>Geschlecht</th><th>Kategorie</th><th></th></tr></thead>
@@ -1277,7 +1429,7 @@ function adminUsers(){
       <td>${u.locked?'<span class="tag tag-rot">gesperrt</span>':'<span class="tag tag-gruen">aktiv</span>'}</td>
       <td>
         <button class="btn btn-sm" onclick="toggleLock('${u.username}')">${u.locked?'Entsperren':'Sperren'}</button>
-        <button class="btn btn-sm" onclick="resetPassword('${u.username}')">Neues Passwort</button>
+        <button class="btn btn-sm" onclick="openSetPasswordModal('${u.username}')">Passwort setzen</button>
         ${u.username!=='Martin'?`<button class="btn btn-sm btn-danger" onclick="deleteUser('${u.username}')">Löschen</button>`:''}
       </td>
     </tr>`).join('');
