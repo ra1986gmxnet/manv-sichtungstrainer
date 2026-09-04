@@ -175,28 +175,65 @@ if(FIREBASE_CONFIGURED){
 
 /* ====================== STORAGE HELPERS ======================
    Jeder "key" (z.B. 'patients', 'users', 'exercises') entspricht einem Dokument
-   in der Firestore-Collection "appdata". So bleibt der Rest der App (loadKey/
-   saveKey-Aufrufe) unverändert, nur der Speicherort wechselt von der
-   Claude-Sandbox zu einer echten, dauerhaften Online-Datenbank. */
+   in der Firestore-Collection "appdata" (im echten Online-Betrieb) bzw. einem
+   Eintrag in window.storage (hier in der Claude-Vorschau) bzw., falls keines von
+   beidem verfügbar ist (z.B. lokal geöffnete Datei ohne eingetragenes Firebase-
+   Projekt), im localStorage des Browsers. So gehen Daten NIE mehr beim Neuladen
+   verloren — sobald ein echtes Firebase-Projekt eingetragen ist (empfohlen für
+   den echten Betrieb, siehe DEPLOYMENT.md), wird automatisch dieses genutzt. */
+const HAS_SANDBOX_STORAGE = (typeof window!=='undefined' && !!window.storage);
+const HAS_LOCALSTORAGE = (function(){
+  try{ const k='__mstart_test__'; localStorage.setItem(k,'1'); localStorage.removeItem(k); return true; }
+  catch(e){ return false; }
+})();
+const LS_PREFIX = 'mstart_appdata_';
+
 async function loadKey(key, fallback){
-  if(!db) return fallback;
-  try{
-    const doc = await db.collection('appdata').doc(key).get();
-    return doc.exists ? JSON.parse(doc.data().value) : fallback;
-  }catch(e){ console.error('Firestore load fehlgeschlagen', key, e); return fallback; }
+  if(db){
+    try{
+      const doc = await db.collection('appdata').doc(key).get();
+      return doc.exists ? JSON.parse(doc.data().value) : fallback;
+    }catch(e){ console.error('Firestore load fehlgeschlagen', key, e); return fallback; }
+  }
+  if(HAS_SANDBOX_STORAGE){
+    try{
+      const r = await window.storage.get(key, true);
+      return r ? JSON.parse(r.value) : fallback;
+    }catch(e){ return fallback; }
+  }
+  if(HAS_LOCALSTORAGE){
+    try{
+      const raw = localStorage.getItem(LS_PREFIX+key);
+      return raw ? JSON.parse(raw) : fallback;
+    }catch(e){ return fallback; }
+  }
+  return fallback;
 }
 async function saveKey(key, value){
-  if(!db) return;
-  try{ await db.collection('appdata').doc(key).set({value: JSON.stringify(value), updatedAt: Date.now()}); }
-  catch(e){ console.error('storage save failed', key, e); }
+  if(db){
+    try{ await db.collection('appdata').doc(key).set({value: JSON.stringify(value), updatedAt: Date.now()}); }
+    catch(e){ console.error('storage save failed', key, e); }
+    return;
+  }
+  if(HAS_SANDBOX_STORAGE){
+    try{ await window.storage.set(key, JSON.stringify(value), true); }
+    catch(e){ console.error('storage save failed', key, e); }
+    return;
+  }
+  if(HAS_LOCALSTORAGE){
+    try{ localStorage.setItem(LS_PREFIX+key, JSON.stringify(value)); }
+    catch(e){ console.error('storage save failed', key, e); }
+  }
 }
 // Wie saveKey, aber mit einem automatischen zweiten Versuch bei transienten Serverfehlern
 // und einem Rückgabewert, damit der Aufrufer echte Fehlschläge erkennen kann.
 async function saveKeyRetry(key, value){
-  if(!db) return false;
+  if(!db && !HAS_SANDBOX_STORAGE && !HAS_LOCALSTORAGE) return false;
   for(let attempt=1; attempt<=2; attempt++){
     try{
-      await db.collection('appdata').doc(key).set({value: JSON.stringify(value), updatedAt: Date.now()});
+      if(db){ await db.collection('appdata').doc(key).set({value: JSON.stringify(value), updatedAt: Date.now()}); }
+      else if(HAS_SANDBOX_STORAGE){ await window.storage.set(key, JSON.stringify(value), true); }
+      else{ localStorage.setItem(LS_PREFIX+key, JSON.stringify(value)); }
       return true;
     }catch(e){
       console.error('storage save failed (Versuch '+attempt+')', key, e);
@@ -254,12 +291,44 @@ function clearSessionHash(){
   try{ history.replaceState(null,'',location.pathname+location.search); }
   catch(e){ location.hash=''; }
 }
+// Merkt sich zusätzlich zum Login auch die aktuell beigetretene Übung + Rolle im Browser
+// (localStorage), damit ein QR-Code-Scan in einem neuen Tab/einer neuen Kamera-App-Session
+// die laufende Übung sofort wiedererkennt, statt jedes Mal neu beitreten zu müssen.
+const LS_SESSION_KEY = 'mstart_session_context';
+function saveExerciseSession(){
+  if(!HAS_LOCALSTORAGE || !St.user) return;
+  try{
+    localStorage.setItem(LS_SESSION_KEY, JSON.stringify({
+      username: St.user.username, exerciseId: St.currentExerciseId, role: St.currentRole
+    }));
+  }catch(e){}
+}
+function restoreExerciseSession(){
+  if(!HAS_LOCALSTORAGE || !St.user) return;
+  try{
+    const raw = localStorage.getItem(LS_SESSION_KEY);
+    if(!raw) return;
+    const s = JSON.parse(raw);
+    if(s.username !== St.user.username) return;
+    const ex = St.exercises.find(e=>e.id===s.exerciseId);
+    if(ex && ex.participants[St.user.username]){
+      St.currentExerciseId = s.exerciseId;
+      St.currentRole = ex.participants[St.user.username];
+    }
+  }catch(e){}
+}
+function clearExerciseSession(){
+  if(!HAS_LOCALSTORAGE) return;
+  try{ localStorage.removeItem(LS_SESSION_KEY); }catch(e){}
+}
 
 async function init(){
-  // QR-Code-Deep-Link aus der URL lesen (z.B. ?ex=abc123&pid=5), bevor irgendetwas anderes passiert.
+  // QR-Code-Deep-Link aus der URL lesen: enthält nur noch eine FESTE Patienten-ID
+  // (z.B. ?pid=12) — unabhängig von einer bestimmten Übung, damit gedruckte
+  // QR-Codes für beliebig viele zukünftige Übungen wiederverwendet werden können.
   const params = new URLSearchParams(location.search);
-  if(params.get('ex') && params.get('pid')){
-    St.pendingDeepLink = {exId: params.get('ex'), pid: parseInt(params.get('pid'))};
+  if(params.get('pid')){
+    St.pendingDeepLink = {pid: parseInt(params.get('pid'))};
   }
 
   St.users = await loadKey('users', null);
@@ -279,8 +348,7 @@ async function init(){
   const sichtRaw = await loadKey('sichtungen_index', {});
   St.sichtungen = sichtRaw;
 
-  // Session nach Reload wiederherstellen (URL-Hash, da echte Server-Sessions
-  // bzw. Browser-Storage in dieser Umgebung nicht verfügbar sind)
+  // Session nach Reload wiederherstellen (Login über URL-Hash, aktuelle Übung/Rolle über localStorage)
   const m = (location.hash||'').match(/u=([^&]+)/);
   if(m){
     const uname = decodeURIComponent(m[1]);
@@ -288,6 +356,7 @@ async function init(){
     if(u && !u.locked){
       St.user = u;
       St.route = u.role==='admin' ? 'admin' : 'exercises';
+      restoreExerciseSession();
     }else{
       clearSessionHash();
     }
@@ -297,73 +366,435 @@ async function init(){
   render();
 }
 
-// Prüft, ob ein QR-Deep-Link ansteht, und öffnet ggf. direkt die passende Sichtungsseite
-// (bzw. zuerst die Rollenauswahl, falls der Nutzer der Übung noch nicht beigetreten ist).
+// Prüft, ob ein QR-Deep-Link (feste Patienten-ID) ansteht, und öffnet ggf. direkt die
+// passende Sichtungsseite — vorausgesetzt, der Nutzer ist bereits einer Übung beigetreten
+// (sonst wird er zuerst zur Übungsauswahl geschickt und landet danach automatisch beim Patienten).
 function tryHandleDeepLink(){
   if(!St.pendingDeepLink || !St.user) return false;
-  const {exId, pid} = St.pendingDeepLink;
-  const ex = St.exercises.find(e=>e.id===exId);
-  if(!ex){ toast('Übung aus dem QR-Code wurde nicht gefunden'); St.pendingDeepLink=null; return false; }
+  const {pid} = St.pendingDeepLink;
   const patient = St.patients.find(p=>p.id===pid);
-  if(!patient){ toast('Patient aus dem QR-Code wurde nicht gefunden'); St.pendingDeepLink=null; return false; }
-  St.currentExerciseId = exId;
-  const myRole = ex.participants[St.user.username];
+  if(!patient){ toast('Kein Patient mit dieser ID gefunden'); St.pendingDeepLink=null; return false; }
   St.pendingDeepLink = null;
-  if(myRole){
-    St.currentRole = myRole;
+  if(St.currentExerciseId && St.currentRole){
     openPatient(pid);
   }else{
     St.deepLinkPatientAfterJoin = pid;
-    openJoinModal(exId);
+    toast('Bitte zuerst einer laufenden Übung beitreten — danach geht es automatisch zum gescannten Patienten weiter.');
+    go('exercises');
   }
   return true;
 }
 
+/* ====================== BASIS-PATIENTENDATENBANK (100 Patienten, lokal generiert) ======================
+   Läuft komplett ohne API-Aufruf (kostenlos, sofort, kein Rate-Limit). Erzeugt genau 100 Patienten nach
+   folgenden festen Quoten:
+   - Alter: 5% Baby, 5% Kleinkind, 5% Schulkind, 85% Erwachsene
+   - Namensherkunft: 10% ausländisch, 90% deutsch
+   - mSTaRT-Kategorie: ca. 1/3 Rot+Blau+Schwarz (davon größtenteils Rot), 1/3 Gelb, 1/3 Grün
+     (Kinder erhalten aus Gründen der Angemessenheit nur Gelb/Grün, nie Blau/Schwarz/Rot) */
+
+function jitter(base, pct){ const delta = base*(pct||0.1)*(Math.random()*2-1); return Math.round(base+delta); }
+function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+const NAME_POOLS = {
+  deMaleFirst:['Jonas','Lukas','Finn','Paul','Felix','Maximilian','Leon','Niklas','Tobias','Simon','Julian','Jan','David','Sebastian','Christian','Michael','Thomas','Stefan','Andreas','Martin','Peter','Klaus','Werner','Hans','Wolfgang','Manfred','Dieter','Uwe','Frank','Matthias'],
+  deFemaleFirst:['Emma','Mia','Hannah','Lea','Lena','Laura','Sophie','Marie','Julia','Anna','Sarah','Nina','Katharina','Christina','Sabine','Petra','Andrea','Susanne','Claudia','Monika','Ingrid','Ursula','Renate','Gisela','Erika','Brigitte','Helga','Christa','Marion','Karin'],
+  deLast:['Müller','Schmidt','Schneider','Fischer','Weber','Meyer','Wagner','Becker','Schulz','Hoffmann','Koch','Bauer','Richter','Klein','Wolf','Neumann','Schwarz','Zimmermann','Braun','Krüger','Hofmann','Hartmann','Lange','Werner','Schmitt','Krause','Meier','Lehmann','Huber','Kaiser'],
+  foreignMaleFirst:['Mehmet','Ahmed','Ali','Yusuf','Emre','Kacper','Piotr','Mateusz','Oleksandr','Andriy','Dmytro','Luca','Matteo','Giovanni','Rashid','Karim','Omar','Youssef','Bogdan','Ivan'],
+  foreignFemaleFirst:['Fatma','Aylin','Zeynep','Elif','Katarzyna','Agnieszka','Olena','Kateryna','Sofia','Giulia','Amira','Layla','Noor','Ioana','Andreea','Natalia'],
+  foreignLast:['Yılmaz','Demir','Kaya','Şahin','Nowak','Kowalski','Wiśniewski','Kovalenko','Shevchenko','Bondarenko','Rossi','Ferrari','Romano','Hassan','Ibrahim','Popescu','Ionescu','Petrenko']
+};
+
+function pickUniqueName(origin, gender, usedNames){
+  const firstPool = origin==='auslaendisch'
+    ? (gender==='männlich' ? NAME_POOLS.foreignMaleFirst : NAME_POOLS.foreignFemaleFirst)
+    : (gender==='männlich' ? NAME_POOLS.deMaleFirst : NAME_POOLS.deFemaleFirst);
+  const lastPool = origin==='auslaendisch' ? NAME_POOLS.foreignLast : NAME_POOLS.deLast;
+  let name, tries=0;
+  do{
+    name = pick(firstPool)+' '+pick(lastPool);
+    tries++;
+  }while(usedNames.has(name) && tries<200);
+  usedNames.add(name);
+  return name.split(' ');
+}
+
+// Basis-Baustein: unspezifizierte Felder bekommen sinnvolle Standardwerte, sodass jedes Template
+// nur die abweichenden Felder angeben muss.
+function mkBase(cat, f){
+  return {
+    kategorieReal: cat,
+    ersteindruck: f.ersteindruck,
+    gehfaehigkeit: f.gehfaehigkeit || 'gehfähig',
+    befunde: f.befunde,
+    koerper: Object.assign({kopf:'',thoraxVorne:'',thoraxHinten:'',armLinks:'',armRechts:'',beinLinks:'',beinRechts:''}, f.koerper||{}),
+    xabcde: Object.assign({X:'Keine kritische Blutung',A:'Frei, ansprechbar',B:'unauffällig',C:'unauffällig',D:'wach, orientiert, GCS 15',E:'keine weiteren Auffälligkeiten'}, f.xabcde||{}),
+    sampler: Object.assign({S:'-',A:'Keine bekannt',M:'Keine Dauermedikation',P:'Keine relevanten Vorerkrankungen',L:'vor ca. 2-4 Std.',E:'-',R:'Keine besonderen Risikofaktoren'}, f.sampler||{}),
+    vitals: Object.assign({puls:'-',blutdruck:'-',rekap:'<2 Sek.',af:'-',spo2:'-',bz:'nicht ermittelbar',temp:jitter(367,0.01)/10+'°C',etco2:'nicht ermittelbar',hb:'nicht ermittelbar',co:'nicht ermittelbar',spmet:'nicht ermittelbar'}, f.vitals||{}),
+    scores: Object.assign({gcs:'15',befast:'unauffällig',news2:'nicht ermittelbar',nexus:'nicht relevant',qsofa:'0',spesi:'nicht ermittelbar',wells:'nicht ermittelbar',apgar:'nicht ermittelbar'}, f.scores||{})
+  };
+}
+
+// ---- Erwachsene: ROT ----
+const TPL_ERW_ROT = [
+  ()=>{ const side=pick(['linken','rechten']); const p=jitter(128,0.1), bd=jitter(95,0.08);
+    return mkBase('rot',{ersteindruck:`Patient liegt auf dem Boden, schreit vor Schmerzen und hält sich den ${side} Oberschenkel.`,
+    gehfaehigkeit:'nicht gehfähig', befunde:`Starke, spritzende Blutung am ${side} Oberschenkel, deutliche Fehlstellung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Offene Fraktur, spritzende arterielle Blutung'},
+    xabcde:{X:`Spritzende arterielle Blutung ${side} Oberschenkel`,B:`AF ${jitter(22,0.1)}/min, symmetrisch`,C:`Puls ${p}/min, blass, kaltschweißig`,D:`Wach, starke Schmerzen`},
+    sampler:{S:'Starke Schmerzen, NRS 9/10',E:'Sturz aus Höhe'},
+    vitals:{puls:p+'/min',blutdruck:bd+'/60 mmHg',rekap:'3 Sek.',af:jitter(22,0.1)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{news2:'6',qsofa:'1'}});},
+  ()=>{ const p=jitter(132,0.08);
+    return mkBase('rot',{ersteindruck:'Patient sitzt gekrümmt am Boden, ringt sichtlich nach Luft, deutliche Zyanose der Lippen.',
+    befunde:'Einseitig abgeschwächtes Atemgeräusch, gestaute Halsvenen, zunehmende Atemnot.',
+    koerper:{thoraxVorne:'Prellmarke, hypersonorer Klopfschall re.'},
+    xabcde:{B:`AF ${jitter(30,0.1)}/min, einseitig abgeschwächt, hypersonor`,C:`Puls ${p}/min, RR fallend`,D:'Unruhig, zunehmend somnolent'},
+    sampler:{E:'Sturz gegen Geländer, Thoraxanprall'},
+    vitals:{puls:p+'/min',blutdruck:jitter(88,0.08)+'/58 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(85,0.03)+'%',rekap:'3 Sek.'},
+    scores:{news2:'8'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient liegt regungslos neben umgestürztem Fahrrad, blutet aus einer Kopfwunde.',
+    befunde:'Große Platzwunde am Hinterkopf, wiederholtes Erbrechen, verzögerte Reaktion auf Ansprache.',
+    koerper:{kopf:'Große Platzwunde, Schwellung, Blutung'},
+    xabcde:{B:`AF ${jitter(20,0.1)}/min`,C:`Puls ${jitter(96,0.08)}/min`,D:'Somnolent, GCS 12, wiederholtes Erbrechen'},
+    sampler:{S:'Kopfschmerzen, Übelkeit',E:'Fahrradsturz ohne Helm'},
+    vitals:{puls:jitter(96,0.08)+'/min',blutdruck:jitter(150,0.07)+'/95 mmHg',af:jitter(20,0.1)+'/min',spo2:jitter(95,0.02)+'%'},
+    scores:{gcs:'12',news2:'6'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient krümmt sich vor Schmerzen, hält sich den Bauch, blasse, kaltschweißige Haut.',
+    befunde:'Brettharter Bauch, deutliche Abwehrspannung, Kreislauf zunehmend instabil.',
+    xabcde:{C:`Puls ${jitter(122,0.08)}/min, RR fallend, blass`,D:'Wach, aber zunehmend unruhig'},
+    sampler:{S:'Starke Bauchschmerzen, diffus',E:'Sturz mit Anprall des Bauches an Gegenstand'},
+    vitals:{puls:jitter(122,0.08)+'/min',blutdruck:jitter(90,0.08)+'/60 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(95,0.02)+'%',rekap:'3 Sek.'},
+    scores:{qsofa:'2',news2:'7'}});},
+  ()=>{ const pct=jitter(30,0.15);
+    return mkBase('rot',{ersteindruck:'Patient liegt auf dem Rücken, Kleidung teils verbrannt, starke Schmerzen im Bereich von Rumpf und Armen.',
+    befunde:`Verbrennungen 2.-3. Grades an Rumpf und beiden Armen, ca. ${pct}% der Körperoberfläche.`,
+    koerper:{thoraxVorne:'Verbrennung 2.-3. Grades',armLinks:'Verbrennung 2. Grades',armRechts:'Verbrennung 2. Grades'},
+    xabcde:{B:`AF ${jitter(24,0.1)}/min`,C:`Puls ${jitter(118,0.08)}/min`,E:`Verbrennungen ca. ${pct}% KOF`},
+    sampler:{S:'Starke Schmerzen im Verbrennungsbereich',E:'Explosion/Stichflamme'},
+    vitals:{puls:jitter(118,0.08)+'/min',blutdruck:jitter(105,0.07)+'/70 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(96,0.02)+'%'},
+    scores:{news2:'5'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient liegt in instabiler Seitenlage, klagt über starke Schmerzen im Becken, kann Beine nicht bewegen.',
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:'Instabiles Becken bei Kompressionstest, deutliche Fehlstellung, Hämatom im Beckenbereich.',
+    xabcde:{C:`Puls ${jitter(126,0.08)}/min, RR grenzwertig`,D:'Wach, starke Schmerzen'},
+    sampler:{S:'Starke Schmerzen Becken, NRS 9/10',E:'Verschüttung/Sturz schwerer Gegenstand'},
+    vitals:{puls:jitter(126,0.08)+'/min',blutdruck:jitter(92,0.08)+'/60 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(94,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt neben eingeklemmter Maschine, ${side} Unterschenkel fehlt teilweise, starke Blutung.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Traumatische Amputation ${side} Unterschenkel, Blutung mittels Druckverband/Tourniquet teils kontrolliert.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Traumatische Amputation, Tourniquet angelegt'},
+    xabcde:{X:'Massive Blutung, Tourniquet vor Ort angelegt',C:`Puls ${jitter(134,0.08)}/min, blass`,D:'Wach, starke Schmerzen, ängstlich'},
+    sampler:{S:'Starke Schmerzen',E:'Einklemmung in Maschine'},
+    vitals:{puls:jitter(134,0.08)+'/min',blutdruck:jitter(88,0.08)+'/55 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(93,0.02)+'%',rekap:'4 Sek.'},
+    scores:{news2:'7'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient liegt benommen am Boden, hustet stark, Ruß im Gesicht sichtbar, Umgebung stark verraucht war.',
+    befunde:'Rußspuren um Mund und Nase, heisere Stimme, zunehmende Bewusstseinstrübung.',
+    koerper:{kopf:'Rußspuren um Mund/Nase'},
+    xabcde:{A:'Heisere Stimme, Verdacht auf Inhalationstrauma',B:`AF ${jitter(26,0.1)}/min`,C:`Puls ${jitter(120,0.08)}/min`,D:'Zunehmend somnolent, GCS 13'},
+    sampler:{S:'Hustenreiz, Kopfschmerzen',E:'Rauchgasexposition in geschlossenem Raum'},
+    vitals:{puls:jitter(120,0.08)+'/min',blutdruck:jitter(115,0.07)+'/75 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(89,0.03)+'%',co:jitter(18,0.15)+'%'},
+    scores:{gcs:'13',news2:'6'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient liegt verdreht zwischen Trümmerteilen, mehrere sichtbare Verletzungen an Armen und Beinen.',
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:'Multiple Frakturen und Prellungen, deutlich reduzierter Allgemeinzustand, Kreislauf grenzwertig.',
+    koerper:{armLinks:'Fraktur, Schwellung',beinRechts:'Fraktur, Fehlstellung'},
+    xabcde:{C:`Puls ${jitter(124,0.08)}/min, RR grenzwertig`,D:'Wach, verlangsamt reagierend'},
+    sampler:{S:'Starke Schmerzen an mehreren Körperstellen',E:'Sturz aus Höhe / Trümmerlage'},
+    vitals:{puls:jitter(124,0.08)+'/min',blutdruck:jitter(96,0.08)+'/62 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient klagt plötzlich über massive Brustschmerzen, ausstrahlend in den linken Arm, Kaltschweiß.',
+    befunde:'Akutes Koronarsyndrom vermutet, deutlich reduzierter Allgemeinzustand, Unruhe.',
+    xabcde:{B:`AF ${jitter(22,0.1)}/min`,C:`Puls ${jitter(110,0.1)}/min, unregelmäßig`,D:'Wach, ängstlich, starke Schmerzen'},
+    sampler:{S:'Massiver Druck auf der Brust, Ausstrahlung linker Arm',P:'Bekannte Herzerkrankung',M:'Blutdrucksenker',E:'Kein Trauma, akutes internistisches Ereignis'},
+    vitals:{puls:jitter(110,0.1)+'/min',blutdruck:jitter(160,0.08)+'/100 mmHg',af:jitter(22,0.1)+'/min',spo2:jitter(93,0.02)+'%'},
+    scores:{news2:'7'}});}
+];
+
+// ---- Erwachsene: BLAU (sehr schwer, kaum überlebensfähig unter Übungsbedingungen) ----
+const TPL_ERW_BLAU = [
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, tiefe Bewusstlosigkeit, keine erkennbare Reaktion auf Schmerzreize.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Schweres Schädel-Hirn-Trauma mit Einklemmungszeichen (weite, lichtstarre Pupille).',
+    koerper:{kopf:'Schweres SHT, sichtbare Kopfverletzung'},
+    xabcde:{A:'Frei, aber keine Schutzreflexe',B:`AF ${jitter(8,0.15)}/min, unregelmäßig`,C:`Puls ${jitter(50,0.15)}/min, kaum tastbar`,D:'GCS 3, weite lichtstarre Pupille'},
+    sampler:{S:'Keine Anamnese möglich (bewusstlos)',E:'Sturz aus großer Höhe'},
+    vitals:{puls:jitter(50,0.15)+'/min',blutdruck:jitter(70,0.1)+'/40 mmHg',af:jitter(8,0.15)+'/min',spo2:jitter(78,0.05)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'3',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, großflächige Verbrennungen über weite Teile des Körpers sichtbar.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Verbrennungen 3. Grades, geschätzt über 60% der Körperoberfläche, Atemwege mitbetroffen.',
+    koerper:{thoraxVorne:'Verbrennung 3. Grades',armLinks:'Verbrennung 3. Grades',armRechts:'Verbrennung 3. Grades',beinLinks:'Verbrennung 3. Grades'},
+    xabcde:{A:'Verlegt durch Schwellung/Ruß',B:`AF ${jitter(10,0.15)}/min, flach`,C:`Puls ${jitter(140,0.1)}/min, kaum tastbar`,D:'Nicht ansprechbar'},
+    sampler:{S:'Keine Anamnese möglich',E:'Explosion mit Stichflamme'},
+    vitals:{puls:jitter(140,0.1)+'/min',blutdruck:jitter(65,0.1)+'/40 mmHg',af:jitter(10,0.15)+'/min',spo2:jitter(70,0.06)+'%',co:jitter(35,0.1)+'%'},
+    scores:{gcs:'4',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos unter Trümmerteilen hervorgeborgen, massive äußere Blutung nicht mehr kontrollierbar.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Nicht beherrschbare Blutung bei Vorliegen mehrerer schwerer Traumata, Kreislauf dekompensiert.',
+    koerper:{beinLinks:'Schwere Quetschverletzung, massive Blutung'},
+    xabcde:{X:'Massive, nicht kontrollierbare Blutung',C:`Puls ${jitter(150,0.1)}/min, kaum tastbar`,D:'GCS 4'},
+    sampler:{S:'Keine Anamnese möglich',E:'Verschüttung, Trümmerlage'},
+    vitals:{puls:jitter(150,0.1)+'/min',blutdruck:jitter(60,0.12)+'/35 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(75,0.06)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'4',news2:'9'}})
+];
+
+// ---- Erwachsene: SCHWARZ (verstorben) ----
+const TPL_ERW_SCHWARZ = [
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt regungslos, keine sichtbare Atemtätigkeit, keine Reaktion auf Ansprache oder Schmerzreiz.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Kein Puls tastbar, keine Atmung feststellbar, Kreislaufstillstand ohne Wiederkehr des Kreislaufs.',
+    xabcde:{A:'Atemweg frei, aber keine Eigenatmung',B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion, GCS 3'},
+    sampler:{S:'Nicht erhebbar',E:'Unbekannt / im Rahmen der Großschadenslage'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar',rekap:'nicht beurteilbar'},
+    scores:{gcs:'3',news2:'nicht ermittelbar'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos, mit den vorliegenden Verletzungen offensichtlich nicht mit dem Leben vereinbar.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Verletzungsmuster eindeutig nicht überlebensfähig, keine Vitalzeichen feststellbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion'},
+    sampler:{S:'Nicht erhebbar',E:'Schwere Krafteinwirkung im Rahmen der Lage'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar'},
+    scores:{gcs:'3'}})
+];
+
+// ---- Erwachsene: GELB ----
+const TPL_ERW_GELB = [
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient sitzt am Boden, hält sich den ${side} Unterschenkel, deutliche Schwellung sichtbar.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Geschlossene Unterschenkelfraktur ${side}, Schwellung, keine kritische Blutung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Geschlossene Fraktur, Schwellung'},
+    sampler:{S:'Schmerzen Unterschenkel, NRS 6/10',E:'Sturz/Stolpern'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient sitzt gebeugt, atmet flach, hält sich den Brustkorb, sichtlich schmerzgeplagt.',
+    befunde:'Prellmarke am Rippenbogen, schmerzbedingt flache Atmung, stabile Vitalwerte.',
+    koerper:{thoraxVorne:'Prellmarke, Druckschmerz'},
+    sampler:{S:'Schmerzen beim Einatmen',E:'Anprall gegen Gegenstand'},
+    vitals:{puls:jitter(96,0.06)+'/min',blutdruck:jitter(130,0.05)+'/84 mmHg',af:jitter(20,0.08)+'/min',spo2:jitter(96,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient steht benommen, hält sich eine blutende Wunde am Kopf, war laut Umstehenden kurz bewusstlos.',
+    befunde:'Platzwunde am Kopf, kurze Bewusstlosigkeit (Amnesie), aktuell wach und orientiert.',
+    koerper:{kopf:'Platzwunde, versorgt'},
+    xabcde:{D:'Wach, orientiert, Z.n. kurzer Bewusstlosigkeit'},
+    sampler:{S:'Kopfschmerzen, Erinnerungslücke',E:'Sturz mit Kopfanprall'},
+    vitals:{puls:jitter(88,0.06)+'/min',blutdruck:jitter(125,0.05)+'/80 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(97,0.01)+'%'},
+    scores:{gcs:'15',news2:'2'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält das ${side} Handgelenk fest, deutliche Schwellung und Fehlstellung.`,
+    befunde:`Verdacht auf Handgelenksfraktur ${side}, Schwellung, Bewegungseinschränkung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Fraktur Handgelenk, Schwellung'},
+    sampler:{S:'Schmerzen Handgelenk',E:'Sturz auf ausgestreckte Hand'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient zeigt eine gerötete, blasige Hautveränderung am ${side} Unterarm.`,
+    befunde:`Verbrennung 2. Grades am ${side} Unterarm, ca. handtellergroß.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Verbrennung 2. Grades, ca. handtellergroß'},
+    sampler:{S:'Brennende Schmerzen Unterarm',E:'Kontakt mit heißer Oberfläche'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(124,0.05)+'/78 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient läuft humpelnd, deutlich sichtbare Prellungen an Armen und Beinen nach Sturz.',
+    befunde:'Multiple Prellungen, keine relevanten Frakturen tastbar, Kreislauf stabil.',
+    koerper:{beinLinks:'Prellmarke'},
+    sampler:{S:'Schmerzen an mehreren Körperstellen',E:'Sturz über Hindernis'},
+    vitals:{puls:jitter(94,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(98,0.01)+'%'}}),
+  ()=>{ const side=pick(['linkes','rechtes']);
+    return mkBase('gelb',{ersteindruck:`Patient sitzt am Boden, hält sich das ${side} Sprunggelenk, deutliche Schwellung.`,
+    befunde:`Distorsion ${side} Sprunggelenk mit Schwellung, keine offene Verletzung.`,
+    gehfaehigkeit:'eingeschränkt gehfähig',
+    koerper:{[side==='linkes'?'beinLinks':'beinRechts']:'Schwellung Sprunggelenk'},
+    sampler:{S:'Schmerzen Sprunggelenk',E:'Umknicken beim Laufen'},
+    vitals:{puls:jitter(88,0.06)+'/min',blutdruck:jitter(122,0.05)+'/78 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient hält die Schulter in Schonhaltung, deutliche sichtbare Fehlstellung.',
+    befunde:'Verdacht auf Schulterluxation, schmerzbedingte Schonhaltung, periphere Durchblutung intakt.',
+    koerper:{armRechts:'Fehlstellung Schulter'},
+    sampler:{S:'Starke Schmerzen Schulter',E:'Sturz auf ausgestreckten Arm'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(18,0.07)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient wirkt aufgeregt, hyperventiliert, klagt über Kribbeln in Händen und um den Mund.',
+    befunde:'Hyperventilation mit Parästhesien, keine körperliche Verletzung erkennbar.',
+    sampler:{S:'Kribbeln, Schwindel, Atemnotgefühl',E:'Akute Belastungsreaktion'},
+    vitals:{puls:jitter(104,0.06)+'/min',blutdruck:jitter(134,0.05)+'/86 mmHg',af:jitter(28,0.08)+'/min',spo2:jitter(98,0.01)+'%'},
+    scores:{news2:'3'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient wirkt blass und schwach, klagt über Schwindel beim Aufstehen.',
+    befunde:'Kreislaufschwäche, vermutlich Flüssigkeitsmangel, keine äußeren Verletzungen.',
+    sampler:{S:'Schwindel, Schwäche',E:'Längere Wartezeit ohne Flüssigkeitszufuhr'},
+    vitals:{puls:jitter(98,0.06)+'/min',blutdruck:jitter(102,0.06)+'/68 mmHg',af:jitter(18,0.07)+'/min',spo2:jitter(97,0.01)+'%'}})
+];
+
+// ---- Erwachsene: GRÜN ----
+const TPL_ERW_GRUEN = [
+  ()=>mkBase('gruen',{ersteindruck:'Patient läuft selbstständig umher, zeigt oberflächliche Schürfwunden an beiden Händen.',
+    befunde:'Oberflächliche Schürfwunden, keine relevante Blutung, keine weiteren Auffälligkeiten.',
+    koerper:{armLinks:'Oberflächliche Schürfwunde'},
+    sampler:{E:'Sturz auf ebenem Untergrund'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linke','rechte']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft leicht hinkend, zeigt eine Prellung am ${side} Knie.`,
+    befunde:`Prellung ${side} Knie, keine Bewegungseinschränkung, keine offene Verletzung.`,
+    koerper:{[side==='linke'?'beinLinks':'beinRechts']:'Prellmarke'},
+    sampler:{E:'Anstoßen beim Ausweichen'},
+    vitals:{puls:jitter(82,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, hat eine bereits versorgte kleine Platzwunde an der Stirn.',
+    befunde:'Kleine, oberflächliche Platzwunde, bereits mit Pflaster versorgt, keine weiteren Beschwerden.',
+    sampler:{E:'Leichter Anprall'},
+    vitals:{puls:jitter(78,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient wirkt aufgewühlt und ängstlich, läuft ruhelos umher, keine sichtbaren Verletzungen.',
+    befunde:'Psychischer Ausnahmezustand nach Erlebtem, körperlich unverletzt.',
+    sampler:{S:'Unruhe, Anspannung',E:'Miterleben der Schadenslage'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient hustet leicht, steht selbstständig, war kurzzeitig in verrauchter Umgebung.',
+    befunde:'Leichte Rauchreizung der Atemwege, unauffällige Sauerstoffsättigung.',
+    sampler:{S:'Leichter Hustenreiz',E:'Kurzzeitige Rauchexposition'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient läuft normal, zeigt eine leichte Zerrung im Bereich der Wade.',
+    befunde:'Muskuläre Zerrung, keine Schwellung, keine Bewegungseinschränkung.',
+    sampler:{E:'Ungeschickte Bewegung beim Ausweichen'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient hält sich ein Taschentuch an die Nase, leichtes Nasenbluten bereits im Abklingen.',
+    befunde:'Spontan sistierendes Nasenbluten, keine weiteren Verletzungen.',
+    sampler:{E:'Leichter Stoß gegen die Nase'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient wirkt blass, klagt über leichte Kopfschmerzen nach dem Schreckmoment.',
+    befunde:'Leichte Kopfschmerzen, keine äußeren Verletzungen, keine neurologischen Auffälligkeiten.',
+    sampler:{S:'Leichte Kopfschmerzen',E:'Schreckreaktion ohne direkten Anprall'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient zeigt eine kleine, oberflächliche Splitterverletzung am Unterarm.',
+    befunde:'Oberflächliche Splitterverletzung, keine relevante Blutung.',
+    koerper:{armRechts:'Oberflächliche Splitterverletzung'},
+    sampler:{E:'Umherfliegende Trümmerteile'},
+    vitals:{puls:jitter(82,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, zeigt eine Prellmarke am Rumpf ohne wesentliche Beschwerden.',
+    befunde:'Prellmarke am Rumpf, keine Atemnot, keine relevanten Beschwerden.',
+    koerper:{thoraxVorne:'Prellmarke'},
+    sampler:{E:'Leichter Anprall'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}})
+];
+
+// ---- Kinder: gemeinsame Vorlagen für Baby/Kleinkind/Schulkind (Gelb/Grün) ----
+const TPL_KIND_GELB = [
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Kind weint, hält den ${side} Arm fest an den Körper gedrückt.`,
+    befunde:`Verdacht auf Unterarmfraktur ${side}, Schwellung, kein Hinweis auf weitere Verletzung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Verdacht auf Fraktur, Schwellung'},
+    xabcde:{D:'Wach, weinend, ansprechbar'},
+    vitals:{af:jitter(24,0.08)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Kind hustet, wirkt unruhig, war kurzzeitig in verrauchter Umgebung.',
+    befunde:'Leichte Rauchgasexposition, Sättigung grenzwertig, sonst unauffällig.',
+    xabcde:{B:`AF ${jitter(28,0.08)}/min`,D:'Wach, unruhig, weinend'},
+    vitals:{af:jitter(28,0.08)+'/min',spo2:jitter(93,0.02)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Kind hält sich weinend den Kopf, kleine Platzwunde sichtbar, war laut Begleitperson kurz benommen.',
+    befunde:'Kleine Kopfplatzwunde, kurzzeitige Benommenheit, aktuell wach und ansprechbar.',
+    koerper:{kopf:'Kleine Platzwunde, versorgt'},
+    xabcde:{D:'Wach, ansprechbar, Z.n. kurzer Benommenheit'},
+    vitals:{af:jitter(22,0.08)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>{const side=pick(['linke','rechte']);
+    return mkBase('gelb',{ersteindruck:`Kind klagt über Schmerzen im ${side} Handgelenk nach Sturz.`,
+    befunde:`Schwellung ${side} Handgelenk, Verdacht auf Fraktur.`,
+    koerper:{[side==='linke'?'armLinks':'armRechts']:'Schwellung, Verdacht auf Fraktur'},
+    xabcde:{D:'Wach, weinend'},
+    vitals:{af:jitter(22,0.08)+'/min',spo2:jitter(98,0.01)+'%'}});}
+];
+const TPL_KIND_GRUEN = [
+  ()=>mkBase('gruen',{ersteindruck:'Kind weint, zeigt oberflächliche Schürfwunden an Knie und Ellenbogen.',
+    befunde:'Oberflächliche Schürfwunden, keine relevante Blutung, Kind lässt sich beruhigen.',
+    koerper:{beinLinks:'Oberflächliche Schürfwunde'},
+    xabcde:{D:'Wach, weinend, aber ansprechbar'},
+    vitals:{af:jitter(22,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind sitzt am Boden, wirkt verängstigt, keine sichtbaren äußeren Verletzungen.',
+    befunde:'Keine äußeren Verletzungen erkennbar, Kind ist verängstigt, sucht Nähe zu Bezugsperson.',
+    xabcde:{D:'Wach, ängstlich, ansprechbar'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind läuft selbstständig, zeigt eine kleine Beule am Kopf ohne weitere Auffälligkeiten.',
+    befunde:'Kleine Beule am Kopf (Hämatom), keine Bewusstseinsstörung, Kind spielt bereits wieder.',
+    koerper:{kopf:'Kleines Hämatom'},
+    xabcde:{D:'Wach, unauffällig'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind zeigt eine kleine, bereits nicht mehr blutende Schürfwunde am Unterarm.',
+    befunde:'Oberflächliche, spontan sistierte Schürfwunde, Kind unauffällig und ansprechbar.',
+    koerper:{armRechts:'Oberflächliche Schürfwunde'},
+    xabcde:{D:'Wach, ansprechbar'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}})
+];
+
+function ageAdjustForChild(patient, ageGroup){
+  if(ageGroup==='baby'){
+    patient.gehfaehigkeit = 'nicht gehfähig (Säugling)';
+    patient.sampler = Object.assign({}, patient.sampler, {S:'nicht erhebbar (Säugling)',A:'nicht erhebbar',M:'nicht erhebbar',P:'nicht erhebbar',L:'nicht erhebbar',R:'nicht erhebbar (Säugling, keine Eigenanamnese möglich)'});
+    patient.vitals = Object.assign({}, patient.vitals, {puls:jitter(135,0.08)+'/min',blutdruck:'nicht ermittelbar',bz:'nicht ermittelbar'});
+    patient.scores.apgar = 'nicht relevant (kein Neugeborenes)';
+  }else if(ageGroup==='kleinkind'){
+    patient.gehfaehigkeit = patient.gehfaehigkeit==='gehfähig' ? 'eingeschränkt gehfähig (Kleinkind)' : patient.gehfaehigkeit;
+    patient.sampler = Object.assign({}, patient.sampler, {A:'nur über Begleitperson erhebbar',M:'nur über Begleitperson erhebbar',P:'nur über Begleitperson erhebbar',L:'nur über Begleitperson erhebbar'});
+    patient.vitals = Object.assign({}, patient.vitals, {puls:jitter(115,0.08)+'/min',blutdruck:'nicht ermittelbar'});
+  }else if(ageGroup==='schulkind'){
+    patient.sampler = Object.assign({}, patient.sampler, {A:'teilweise selbst, teilweise über Begleitperson erhebbar',M:'über Begleitperson erhebbar'});
+    patient.vitals = Object.assign({}, patient.vitals, {puls:jitter(95,0.08)+'/min'});
+  }
+  return patient;
+}
+
+function buildOnePatient(id, ageGroup, origin, cat){
+  const gender = pick(['männlich','weiblich']);
+  let pool;
+  if(ageGroup==='erwachsen'){
+    pool = cat==='rot' ? TPL_ERW_ROT : cat==='blau' ? TPL_ERW_BLAU : cat==='schwarz' ? TPL_ERW_SCHWARZ
+         : cat==='gelb' ? TPL_ERW_GELB : TPL_ERW_GRUEN;
+  }else{
+    pool = cat==='gelb' ? TPL_KIND_GELB : TPL_KIND_GRUEN;
+  }
+  const patient = pick(pool)();
+  if(ageGroup!=='erwachsen') ageAdjustForChild(patient, ageGroup);
+
+  let alter;
+  if(ageGroup==='baby') alter = 0;
+  else if(ageGroup==='kleinkind') alter = 1+Math.floor(Math.random()*5);
+  else if(ageGroup==='schulkind') alter = 6+Math.floor(Math.random()*7);
+  else alter = 18+Math.floor(Math.random()*72);
+
+  patient.id = id;
+  patient.geschlecht = gender;
+  patient.alter = alter;
+  return patient;
+}
+
 function seedPatients(){
-  return [
-    {
-      id:1, vorname:'Jonas', nachname:'Weber', alter:34, geschlecht:'männlich',
-      ersteindruck:'Patient liegt auf dem Boden, schreit vor Schmerzen und hält sich den rechten Oberschenkel.',
-      gehfaehigkeit:'nicht gehfähig',
-      befunde:'Starke, spritzende Blutung am rechten Oberschenkel, deutliche Fehlstellung.',
-      koerper:{kopf:'',thoraxVorne:'',thoraxHinten:'',armLinks:'',armRechts:'',beinLinks:'',beinRechts:'Offene Fraktur, spritzende arterielle Blutung'},
-      xabcde:{X:'Spritzende arterielle Blutung rechter Oberschenkel',A:'Frei, ansprechbar',B:'AF 22/min, symmetrisch',C:'Puls 128/min, blass, kaltschweißig',D:'Wach, GCS 15, starke Schmerzen',E:'Keine weiteren äußeren Verletzungen sichtbar'},
-      sampler:{S:'Starke Schmerzen rechter Oberschenkel, NRS 9/10',A:'Keine bekannt',M:'Keine Dauermedikation',P:'Keine relevanten Vorerkrankungen',L:'Letzte Mahlzeit vor ca. 3 Std.',E:'Sturz vom Gerüst, ca. 3m Höhe',R:'Keine besonderen Risikofaktoren'},
-      vitals:{puls:'128/min',blutdruck:'95/60 mmHg',rekap:'3 Sek.',af:'22/min',spo2:'94%',bz:'110 mg/dl',temp:'36,4°C',etco2:'nicht ermittelbar',hb:'nicht ermittelbar',co:'nicht ermittelbar',spmet:'nicht ermittelbar'},
-      scores:{gcs:'15',befast:'unauffällig',news2:'5',nexus:'nicht relevant',qsofa:'0',spesi:'nicht ermittelbar',wells:'nicht ermittelbar',apgar:'nicht ermittelbar'},
-      kategorieReal:'rot'
-    },
-    {
-      id:2, vorname:'Amina', nachname:'Yildiz', alter:7, geschlecht:'weiblich',
-      ersteindruck:'Kind sitzt weinend am Straßenrand, hält den linken Arm fest an den Körper gedrückt.',
-      gehfaehigkeit:'gehfähig',
-      befunde:'Deutliche Schwellung und Fehlstellung des linken Unterarms, keine weiteren äußeren Verletzungen.',
-      koerper:{kopf:'',thoraxVorne:'',thoraxHinten:'',armLinks:'Geschlossene Unterarmfraktur, Schwellung',armRechts:'',beinLinks:'',beinRechts:''},
-      xabcde:{X:'Keine kritische Blutung',A:'Frei, weinend, ansprechbar',B:'AF 24/min, unauffällig',C:'Puls 118/min, warme Extremitäten',D:'Wach, GCS 15, Anamnese eingeschränkt möglich (Kind)',E:'Keine weiteren Auffälligkeiten'},
-      sampler:{S:'Schmerzen linker Unterarm',A:'Von Eltern unbekannt / nicht erhebbar',M:'Nicht erhebbar',P:'Nicht erhebbar',L:'Nicht erhebbar',E:'Sturz vom Klettergerüst',R:'Kind – eingeschränkte Anamnese'},
-      vitals:{puls:'118/min',blutdruck:'100/65 mmHg',rekap:'2 Sek.',af:'24/min',spo2:'98%',bz:'nicht ermittelbar',temp:'36,8°C',etco2:'nicht ermittelbar',hb:'nicht ermittelbar',co:'nicht ermittelbar',spmet:'nicht ermittelbar'},
-      scores:{gcs:'15',befast:'nicht ermittelbar',news2:'nicht ermittelbar',nexus:'nicht relevant',qsofa:'nicht ermittelbar',spesi:'nicht ermittelbar',wells:'nicht ermittelbar',apgar:'nicht ermittelbar'},
-      kategorieReal:'gruen'
-    },
-    {
-      id:3, vorname:'unbekannt',nachname:'(bewusstlos)', alter:58, geschlecht:'männlich',
-      ersteindruck:'Patient liegt regungslos auf dem Boden, reagiert nicht auf Ansprache.',
-      gehfaehigkeit:'nicht gehfähig / bewusstlos',
-      befunde:'Verbrennungen im Gesicht, Ruß in Mund und Nase, keine sichtbare Atmung erkennbar bei erstem Blick.',
-      koerper:{kopf:'Verbrennungen Gesicht, Ruß in Mund/Nase',thoraxVorne:'',thoraxHinten:'',armLinks:'',armRechts:'',beinLinks:'',beinRechts:''},
-      xabcde:{X:'Keine kritische Blutung sichtbar',A:'Verlegt durch Ruß/Schwellung, Atemgeräusch heiser',B:'AF 6/min, flach, Atemwegsverlegung möglich',C:'Puls 138/min, kaum tastbar',D:'GCS 6, keine Anamnese möglich (bewusstlos)',E:'Verbrennungen Gesicht ca. 9% KOF'},
-      sampler:{S:'Nicht erhebbar (bewusstlos)',A:'Nicht erhebbar',M:'Nicht erhebbar',P:'Nicht erhebbar',L:'Nicht erhebbar',E:'Explosion / Gebäudebrand',R:'Bewusstlos – keine Anamnese möglich'},
-      vitals:{puls:'138/min',blutdruck:'80/50 mmHg',rekap:'4 Sek.',af:'6/min',spo2:'82%',bz:'nicht ermittelbar',temp:'35,9°C',etco2:'28 mmHg',hb:'nicht ermittelbar',co:'22%',spmet:'nicht ermittelbar'},
-      scores:{gcs:'6',befast:'nicht ermittelbar',news2:'nicht ermittelbar',nexus:'nicht relevant',qsofa:'2',spesi:'nicht ermittelbar',wells:'nicht ermittelbar',apgar:'nicht ermittelbar'},
-      kategorieReal:'rot'
+  const total = 100;
+  const usedNames = new Set();
+  const ageQueue = buildQuotaQueue(total, {baby:0.05, kleinkind:0.05, schulkind:0.05, erwachsen:0.85});
+  const originQueue = buildQuotaQueue(total, {auslaendisch:0.10, deutsch:0.90});
+
+  const childCount = ageQueue.filter(a=>a!=='erwachsen').length;
+  const adultCount = total - childCount;
+  const childCatQueue = buildQuotaQueue(childCount, {gelb:0.5, gruen:0.5});
+  const adultGroupQueue = buildQuotaQueue(adultCount, {rotgroup:34/adultCount, gelb:25/adultCount, gruen:26/adultCount});
+  const rotgroupCount = adultGroupQueue.filter(g=>g==='rotgroup').length;
+  const rotSplitQueue = buildQuotaQueue(rotgroupCount, {rot:26/rotgroupCount, blau:4/rotgroupCount, schwarz:4/rotgroupCount});
+
+  let childCatI=0, adultGroupI=0, rotSplitI=0;
+  const patients = [];
+  for(let i=0;i<total;i++){
+    const ageGroup = ageQueue[i];
+    const origin = originQueue[i];
+    let cat;
+    if(ageGroup!=='erwachsen'){
+      cat = childCatQueue[childCatI++];
+    }else{
+      const g = adultGroupQueue[adultGroupI++];
+      cat = g==='rotgroup' ? rotSplitQueue[rotSplitI++] : g;
     }
-  ];
+    const patient = buildOnePatient(i+1, ageGroup, origin, cat);
+    const gender = patient.geschlecht;
+    const [vorname, nachname] = pickUniqueName(origin, gender, usedNames);
+    patient.vorname = vorname;
+    patient.nachname = nachname;
+    patients.push(patient);
+  }
+  return patients;
 }
 
 /* ====================== NAV ====================== */
 function go(route){ St.route = route; render(); window.scrollTo(0,0); }
 
-function logout(){ St.user=null; St.currentExerciseId=null; St.currentRole=null; clearSessionHash(); go('login'); }
+function logout(){ St.user=null; St.currentExerciseId=null; St.currentRole=null; clearSessionHash(); clearExerciseSession(); go('login'); }
 
 /* ====================== AUTH ====================== */
 async function doLogin(username, password){
@@ -453,6 +884,7 @@ async function joinExercise(exId, role){
   await saveKey('exercises', St.exercises);
   St.currentExerciseId = exId;
   St.currentRole = role;
+  saveExerciseSession();
   if(St.deepLinkPatientAfterJoin){
     const pid = St.deepLinkPatientAfterJoin;
     St.deepLinkPatientAfterJoin = null;
@@ -559,11 +991,13 @@ async function assignHospital(hospId){
 /* ====================== ADMIN: PATIENTS ====================== */
 
 /* ---- QR-Codes ---- */
-// Baut die URL, die im QR-Code steckt: öffnet die App und springt (nach Login/Rollenwahl)
-// direkt zur Sichtungsseite dieses Patienten in der gewählten Übung.
-function patientQrUrl(exId, pid){
+// Baut die URL, die im QR-Code steckt: enthält NUR die feste Patienten-ID (kein Übungsbezug).
+// So können einmal gedruckte QR-Codes für beliebig viele zukünftige Übungen wiederverwendet
+// werden — welcher Patient hinter einer ID steckt, wird stattdessen in der Patientendatenbank
+// festgelegt (Standard: fortlaufend 1-100, vom Admin änderbar).
+function patientQrUrl(pid){
   const base = location.origin + location.pathname;
-  return `${base}?ex=${encodeURIComponent(exId)}&pid=${pid}`;
+  return `${base}?pid=${pid}`;
 }
 // Erzeugt synchron ein PNG-Data-URL eines QR-Codes für den gegebenen Text.
 function qrDataUrl(text, size){
@@ -581,36 +1015,36 @@ function qrDataUrl(text, size){
   return dataUrl;
 }
 function showPatientQr(pid){
-  if(!St.qrExerciseId){ toast('Bitte zuerst oben eine Übung für die QR-Codes auswählen'); return; }
-  const url = patientQrUrl(St.qrExerciseId, pid);
+  const url = patientQrUrl(pid);
   const img = qrDataUrl(url, 220);
   modalHtml = `
   <div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal" style="text-align:center;">
       <span class="close-x" onclick="closeModal()">✕</span>
-      <h2>QR-Code Patient #${pid}</h2>
+      <h2>QR-Code ID #${pid}</h2>
       <img src="${img}" style="width:220px;height:220px;margin:10px 0;">
       <p class="small" style="word-break:break-all;">${url}</p>
+      <p class="small">Dieser Code ist fest an die ID #${pid} gebunden und funktioniert für jede
+        zukünftige Übung — welcher Patient aktuell ID #${pid} trägt, legst du in der Patiententabelle fest.</p>
       <button class="btn btn-primary" style="width:100%" onclick="exportQrPdf([${pid}])">Diesen QR-Code als PDF/Druck öffnen</button>
     </div>
   </div>`;
   render();
 }
 // Öffnet ein Druckfenster mit einem QR-Code pro DIN-A4-Seite (patientIds=null -> alle Patienten).
+// Die Codes sind fest an die ID gebunden, nicht an eine bestimmte Übung — einmal drucken, immer wiederverwenden.
 function exportQrPdf(patientIds){
-  if(!St.qrExerciseId){ toast('Bitte zuerst oben eine Übung für die QR-Codes auswählen'); return; }
-  const ex = St.exercises.find(e=>e.id===St.qrExerciseId);
   const ids = patientIds || St.patients.map(p=>p.id);
   const pages = ids.map(pid=>{
-    const url = patientQrUrl(St.qrExerciseId, pid);
+    const url = patientQrUrl(pid);
     const img = qrDataUrl(url, 300);
     return `<div class="qrpage"><div class="qrbox">
-      <div class="qrid">Patient #${pid}</div>
+      <div class="qrid">ID #${pid}</div>
       <img src="${img}">
       <div class="qrurl">${url}</div>
     </div></div>`;
   }).join('');
-  const html = `<html><head><meta charset="utf-8"><title>QR-Codes – ${ex?ex.name:''}</title>
+  const html = `<html><head><meta charset="utf-8"><title>QR-Codes – mSTaRT Sichtungstrainer</title>
   <style>
     @page{ size:A4; margin:0; }
     body{ font-family:sans-serif; margin:0; }
@@ -1265,13 +1699,46 @@ function viewAdmin(){
   return `<div class="wrap"><h1>Admin-Bereich</h1><div class="tabs">${tabBar}</div>${content}</div>`;
 }
 
-function adminPatients(){
-  // Wenn noch keine Übung für QR-Codes gewählt wurde, automatisch die erste vorhandene nehmen
-  if(!St.qrExerciseId && St.exercises.length){ St.qrExerciseId = St.exercises[0].id; }
+function openChangeIdModal(pid){
+  const p = St.patients.find(x=>x.id===pid); if(!p) return;
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>ID ändern für ${p.vorname} ${p.nachname}</h2>
+      <p class="small">Diese ID bestimmt, welcher fest ausgedruckte QR-Code diesem Patienten zugeordnet ist.
+        Sie muss eindeutig sein (kein anderer Patient darf dieselbe ID tragen).</p>
+      <div class="field"><label>Neue ID</label><input id="cid-new" type="number" value="${p.id}" min="1"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="changePatientId(${p.id}, parseInt(document.getElementById('cid-new').value))">ID übernehmen</button>
+    </div>
+  </div>`;
+  render();
+}
+async function changePatientId(oldId, newId){
+  if(!newId || newId<1 || !Number.isInteger(newId)){ toast('Bitte eine gültige positive Ganzzahl eingeben'); return; }
+  if(newId===oldId){ closeModal(); return; }
+  if(St.patients.some(p=>p.id===newId)){ toast(`ID #${newId} ist bereits vergeben — bitte eine andere wählen`); return; }
+  const p = St.patients.find(x=>x.id===oldId); if(!p) return;
+  p.id = newId;
+  // Bereits erfasste Sichtungsergebnisse für die alte ID auf die neue ID ummappen,
+  // damit keine Historie verloren geht bzw. auf einen falschen Patienten zeigt.
+  Object.keys(St.sichtungen).forEach(exId=>{
+    (St.sichtungen[exId]||[]).forEach(rec=>{
+      if(rec.patientId===oldId) rec.patientId = newId;
+    });
+  });
+  await saveKey('patients', St.patients);
+  await saveKey('sichtungen_index', St.sichtungen);
+  toast(`ID geändert: #${oldId} → #${newId}`);
+  closeModal();
+}
 
+function adminPatients(){
   const genBox = `
   <div class="card">
-    <h3>Neue Patienten per KI generieren</h3>
+    <h3>Zusätzliche Patienten per KI generieren (nur Admin)</h3>
+    <p class="small">Die 100 Standardpatienten der Datenbank bleiben davon unberührt — hiermit werden ausschließlich
+      weitere, zusätzliche Patienten ergänzt (nichts wird ersetzt oder gelöscht).</p>
     <div class="row">
       <div class="field"><label>Anzahl</label><input id="ai-count" type="number" value="6" min="1" max="100"></div>
       <div class="field" style="flex:2;"><label>Szenario</label><input id="ai-scenario" placeholder="z.B. Explosion mit Einsturz"></div>
@@ -1287,7 +1754,7 @@ function adminPatients(){
       document.getElementById('ai-rot').value,
       document.getElementById('ai-gelb').value,
       document.getElementById('ai-gruen').value)">
-      ${St.aiBusy? 'Generiere…' : 'Patienten generieren'}
+      ${St.aiBusy? 'Generiere…' : 'Zusätzliche Patienten generieren'}
     </button>
     ${St.aiBusy?`<p class="small">${St.aiProgress}</p>`:''}
     ${(!St.aiBusy && St.aiLastError)?`<div class="value-box" style="border-color:var(--red);"><div class="lbl" style="color:var(--red)">Letzter Fehler bei der Generierung</div><div class="val" style="font-family:monospace;font-size:.82rem;word-break:break-word;">${St.aiLastError}</div></div>`:''}
@@ -1298,16 +1765,10 @@ function adminPatients(){
   const qrBox = `
   <div class="card">
     <h3>QR-Codes zum Sichten</h3>
-    <p class="small">Jeder Patient bekommt einen QR-Code, der Teilnehmer direkt zur Sichtungsseite führt.
-      Da eine Sichtung immer zu einer Übung gehört, wähle zuerst, für welche Übung die Codes gelten sollen.</p>
-    <div class="field">
-      <label>Übung für QR-Codes</label>
-      <select onchange="St.qrExerciseId=this.value;render()">
-        ${St.exercises.length ? St.exercises.map(ex=>`<option value="${ex.id}" ${St.qrExerciseId===ex.id?'selected':''}>${ex.name}</option>`).join('') : '<option value="">Keine Übung vorhanden</option>'}
-      </select>
-    </div>
-    <button class="btn btn-primary" ${!St.exercises.length?'disabled':''} onclick="exportQrPdf(null)">📄 PDF mit allen QR-Codes erzeugen (1 pro Seite)</button>
-    ${!St.exercises.length?'<p class="small">Lege zuerst unter "Übungen" eine Übung an.</p>':''}
+    <p class="small">Jede ID hat einen festen QR-Code — unabhängig von einer bestimmten Übung. Einmal ausdrucken
+      und beliebig oft wiederverwenden: Welcher Patient hinter einer ID steckt, legst du unten in der Tabelle über
+      die ID-Spalte fest (Standard: fortlaufend 1–${St.patients.length}).</p>
+    <button class="btn btn-primary" ${!St.patients.length?'disabled':''} onclick="exportQrPdf(null)">📄 PDF mit allen QR-Codes erzeugen (1 pro Seite)</button>
   </div>`;
 
   const rows = St.patients.map(p=>`
@@ -1318,7 +1779,8 @@ function adminPatients(){
       <td>${p.geschlecht}</td>
       <td><span class="tag tag-${p.kategorieReal}">${CAT_LABEL[p.kategorieReal]}</span></td>
       <td><button class="btn btn-sm" onclick="openPatientEdit(${p.id})">Bearbeiten</button>
-      <button class="btn btn-sm" ${!St.exercises.length?'disabled':''} onclick="showPatientQr(${p.id})">QR-Code</button>
+      <button class="btn btn-sm" onclick="openChangeIdModal(${p.id})">ID ändern</button>
+      <button class="btn btn-sm" onclick="showPatientQr(${p.id})">QR-Code</button>
       <button class="btn btn-sm btn-danger" onclick="deletePatient(${p.id})">Löschen</button></td>
     </tr>`).join('') || `<tr><td colspan="6" class="empty">Keine Patienten</td></tr>`;
 
@@ -1467,7 +1929,9 @@ function adminExercises(){
       </div>
     </div>`;
   }).join('') || '<div class="empty">Keine Übungen</div>';
-  return rows;
+  return `<div class="flex-between"><h3 style="margin:0;">Alle Übungen</h3>
+    <button class="btn btn-primary" onclick="openCreateExerciseModal()">+ Neue Übung</button></div>
+    <div style="margin-top:12px;">${rows}</div>`;
 }
 
 /* ====================== MAIN RENDER ====================== */
@@ -1477,6 +1941,10 @@ function render(){
   if(!St.user){
     body = St.route==='register' ? viewRegister() : viewLogin();
   }else{
+    // Zusätzliche Absicherung: Admin-Bereich (inkl. KI-Patientengenerierung) ist
+    // ausschließlich für die Rolle "admin" zugänglich, auch wenn St.route manuell
+    // (z.B. über die Browser-Konsole) auf 'admin' gesetzt würde.
+    if(St.route==='admin' && St.user.role!=='admin'){ St.route='exercises'; }
     body = topbar();
     if(St.route==='exercises') body += viewExercises();
     else if(St.route==='patients') body += viewPatients();
