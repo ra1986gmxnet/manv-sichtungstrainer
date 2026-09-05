@@ -425,7 +425,10 @@ function mkBase(cat, f){
   return {
     kategorieReal: cat,
     ersteindruck: f.ersteindruck,
-    gehfaehigkeit: f.gehfaehigkeit || 'gehfähig',
+    // WICHTIG: Nur die Kategorie "grün" ist per mSTaRT-Definition gehfähig. Alle anderen
+    // Kategorien sind standardmäßig NICHT gehfähig, außer ein Template gibt explizit eine
+    // abweichende (aber weiterhin nicht-plain-"gehfähig") Formulierung vor.
+    gehfaehigkeit: f.gehfaehigkeit || (cat==='gruen' ? 'gehfähig' : 'nicht gehfähig'),
     befunde: f.befunde,
     koerper: Object.assign({kopf:'',thoraxVorne:'',thoraxHinten:'',armLinks:'',armRechts:'',beinLinks:'',beinRechts:''}, f.koerper||{}),
     xabcde: Object.assign({X:'Keine kritische Blutung',A:'Frei, ansprechbar',B:'unauffällig',C:'unauffällig',D:'wach, orientiert, GCS 15',E:'keine weiteren Auffälligkeiten'}, f.xabcde||{}),
@@ -452,7 +455,7 @@ const TPL_ERW_ROT = [
     xabcde:{B:`AF ${jitter(30,0.1)}/min, einseitig abgeschwächt, hypersonor`,C:`Puls ${p}/min, RR fallend`,D:'Unruhig, zunehmend somnolent'},
     sampler:{E:'Sturz gegen Geländer, Thoraxanprall'},
     vitals:{puls:p+'/min',blutdruck:jitter(88,0.08)+'/58 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(85,0.03)+'%',rekap:'3 Sek.'},
-    scores:{news2:'8'}});},
+    scores:{news2:'8',gcs:'13'}});},
   ()=>{ return mkBase('rot',{ersteindruck:'Patient liegt regungslos neben umgestürztem Fahrrad, blutet aus einer Kopfwunde.',
     befunde:'Große Platzwunde am Hinterkopf, wiederholtes Erbrechen, verzögerte Reaktion auf Ansprache.',
     koerper:{kopf:'Große Platzwunde, Schwellung, Blutung'},
@@ -504,13 +507,133 @@ const TPL_ERW_ROT = [
     xabcde:{C:`Puls ${jitter(124,0.08)}/min, RR grenzwertig`,D:'Wach, verlangsamt reagierend'},
     sampler:{S:'Starke Schmerzen an mehreren Körperstellen',E:'Sturz aus Höhe / Trümmerlage'},
     vitals:{puls:jitter(124,0.08)+'/min',blutdruck:jitter(96,0.08)+'/62 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
-    scores:{news2:'6'}});},
+    scores:{news2:'6',gcs:'14'}});},
   ()=>{ return mkBase('rot',{ersteindruck:'Patient klagt plötzlich über massive Brustschmerzen, ausstrahlend in den linken Arm, Kaltschweiß.',
     befunde:'Akutes Koronarsyndrom vermutet, deutlich reduzierter Allgemeinzustand, Unruhe.',
     xabcde:{B:`AF ${jitter(22,0.1)}/min`,C:`Puls ${jitter(110,0.1)}/min, unregelmäßig`,D:'Wach, ängstlich, starke Schmerzen'},
     sampler:{S:'Massiver Druck auf der Brust, Ausstrahlung linker Arm',P:'Bekannte Herzerkrankung',M:'Blutdrucksenker',E:'Kein Trauma, akutes internistisches Ereignis'},
     vitals:{puls:jitter(110,0.1)+'/min',blutdruck:jitter(160,0.08)+'/100 mmHg',af:jitter(22,0.1)+'/min',spo2:jitter(93,0.02)+'%'},
-    scores:{news2:'7'}});}
+    scores:{news2:'7'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt am Boden, ${side} Unterschenkel in unnatürlicher Stellung, starke Schmerzen.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Offene Unterschenkelfraktur ${side} mit sichtbarem Knochenkontakt, mäßige Blutung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Offene Fraktur mit Knochenkontakt'},
+    xabcde:{X:'Mäßige Blutung, kontrollierbar mit Druckverband',C:`Puls ${jitter(116,0.08)}/min`,D:'Wach, starke Schmerzen'},
+    sampler:{S:'Starke Schmerzen, NRS 9/10',E:'Verkehrsunfall als Fußgänger'},
+    vitals:{puls:jitter(116,0.08)+'/min',blutdruck:jitter(100,0.07)+'/65 mmHg',af:jitter(22,0.08)+'/min',spo2:jitter(95,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'5'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient sitzt zusammengesackt, Atmung deutlich angestrengt, Lippen bläulich verfärbt.',
+    befunde:'Zunehmende Ateminsuffizienz bei Verdacht auf Rippenserienfraktur, instabiler Thoraxabschnitt tastbar.',
+    koerper:{thoraxVorne:'Instabiler Thoraxabschnitt, paradoxe Atembewegung'},
+    xabcde:{B:`AF ${jitter(32,0.1)}/min, paradoxe Atembewegung`,C:`Puls ${jitter(128,0.08)}/min`,D:'Wach, sichtlich erschöpft'},
+    sampler:{S:'Starke Atemnot',E:'Sturz auf den Brustkorb'},
+    vitals:{puls:jitter(128,0.08)+'/min',blutdruck:jitter(98,0.08)+'/64 mmHg',af:jitter(32,0.1)+'/min',spo2:jitter(86,0.03)+'%'},
+    scores:{news2:'8'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt seitlich, hat sich mehrfach übergeben, reagiert nur noch verzögert auf lautes Ansprechen.',
+    befunde:'Verdacht auf schweres Schädel-Hirn-Trauma, wiederholtes Erbrechen, zunehmende Bewusstseinstrübung.',
+    koerper:{kopf:'Prellmarke, keine offene Wunde sichtbar'},
+    xabcde:{A:'Aspirationsgefahr durch Erbrechen, Atemweg wird freigehalten',C:`Puls ${jitter(100,0.08)}/min`,D:'Zunehmend somnolent, GCS 10'},
+    sampler:{S:'Nicht erhebbar, zunehmend eingeschränkte Ansprechbarkeit',E:'Sturz aus größerer Höhe'},
+    vitals:{puls:jitter(100,0.08)+'/min',blutdruck:jitter(140,0.07)+'/90 mmHg',af:jitter(18,0.08)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{gcs:'10',news2:'6'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt am Boden, ${side} Hand fast vollständig abgetrennt, blutet stark.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Subtotale Amputation der ${side} Hand, Blutung mittels Druckverband teilkontrolliert.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Subtotale Amputation, Druckverband angelegt'},
+    xabcde:{X:'Starke Blutung, Druckverband angelegt',C:`Puls ${jitter(126,0.08)}/min, blass`,D:'Wach, starke Schmerzen, ängstlich'},
+    sampler:{S:'Starke Schmerzen',E:'Einklemmung in Maschine'},
+    vitals:{puls:jitter(126,0.08)+'/min',blutdruck:jitter(96,0.08)+'/62 mmHg',af:jitter(24,0.09)+'/min',spo2:jitter(94,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt auf dem Rücken, Bauchdecke sichtbar gespannt, klagt kaum noch, wirkt zunehmend teilnahmslos.',
+    befunde:'Zunehmend stilles Abdomen bei Verdacht auf innere Blutung, Kreislauf dekompensierend.',
+    xabcde:{C:`Puls ${jitter(136,0.08)}/min, kaum tastbar, RR fallend`,D:'Zunehmend teilnahmslos, GCS 13'},
+    sampler:{S:'Nachlassende Schmerzäußerung trotz schwerer Verletzung',E:'Stumpfes Bauchtrauma durch Anprall'},
+    vitals:{puls:jitter(136,0.08)+'/min',blutdruck:jitter(80,0.08)+'/52 mmHg',af:jitter(26,0.09)+'/min',spo2:jitter(92,0.02)+'%',rekap:'4 Sek.'},
+    scores:{gcs:'13',qsofa:'2',news2:'8'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient wirkt zunehmend verwirrt, spricht unzusammenhängend, wiederholt dieselben Fragen.',
+    befunde:'Verdacht auf hypoxische Verwirrtheit bei Rauchgasinhalation, keine sichtbaren äußeren Verletzungen.',
+    xabcde:{A:'Frei, aber heisere Stimme',B:`AF ${jitter(28,0.1)}/min`,C:`Puls ${jitter(112,0.08)}/min`,D:'Verwirrt, desorientiert, GCS 13'},
+    sampler:{S:'Verwirrtheit, Kopfschmerzen',E:'Längere Rauchgasexposition in geschlossenem Raum'},
+    vitals:{puls:jitter(112,0.08)+'/min',blutdruck:jitter(110,0.07)+'/72 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(88,0.03)+'%',co:jitter(22,0.12)+'%'},
+    scores:{gcs:'13',news2:'6'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt verkrampft am Boden, hält sich den Unterleib, kaltschweißig und auffällig blass.',
+    befunde:'Instabile Beckenfraktur mit sichtbarer Beckenasymmetrie, zunehmender Kreislaufschock.',
+    xabcde:{X:'Innere Blutung im Becken möglich',B:`AF ${jitter(26,0.1)}/min`,C:`Puls ${jitter(135,0.08)}/min, kaum tastbar`,D:'Wach, zunehmend unruhig'},
+    sampler:{S:'Starke Beckenschmerzen',E:'Verschüttung, Trümmerlage'},
+    vitals:{puls:jitter(135,0.08)+'/min',blutdruck:jitter(80,0.08)+'/50 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(90,0.03)+'%',rekap:'4 Sek.'},
+    scores:{qsofa:'2',news2:'8'}}),
+  ()=>{ const p=jitter(150,0.08);
+    return mkBase('rot',{ersteindruck:'Patient krampfte sichtbar am Boden, liegt nun schlaff und ist nicht erweckbar, Zungenbiss sichtbar.',
+    befunde:'Generalisierter Krampfanfall, postiktal nicht erweckbar, Kopfverletzung durch Sturz während des Anfalls.',
+    koerper:{kopf:'Kleine Platzwunde durch Sturz'},
+    xabcde:{A:'Frei, aber reduzierte Schutzreflexe',B:`AF ${jitter(24,0.1)}/min`,C:`Puls ${p}/min`,D:'Postiktal, GCS 9, nicht erweckbar'},
+    sampler:{S:'Nicht erhebbar (postiktal)',P:'Anfallsleiden unbekannt',E:'Krampfanfall während der Lage'},
+    vitals:{puls:p+'/min',blutdruck:jitter(110,0.06)+'/70 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(90,0.02)+'%'},
+    scores:{gcs:'9',news2:'6'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt am Boden, ${side} Unterschenkel in unnatürlicher Stellung, Schmerzensäußerung lässt spürbar nach.`,
+    befunde:`Offene Unterschenkelfraktur ${side} mit sichtbarem Knochendurchtritt, zunehmend blasser Patient.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Offene Fraktur mit Knochendurchtritt'},
+    xabcde:{X:'Mäßige, aber anhaltende Blutung',C:`Puls ${jitter(120,0.08)}/min, blass`,D:'Wach, Schmerzen lassen nach, wirkt zunehmend apathisch'},
+    sampler:{S:'Starke Schmerzen, nun nachlassend',E:'Sturz von Trümmerteilen'},
+    vitals:{puls:jitter(120,0.08)+'/min',blutdruck:jitter(92,0.07)+'/58 mmHg',af:jitter(24,0.08)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'7'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient sitzt zusammengesunken, hält sich die Brust, Lippen bläulich verfärbt, Atmung deutlich angestrengt.',
+    befunde:'Verdacht auf akutes Koronarsyndrom, ausstrahlender Brustschmerz, zunehmende Luftnot.',
+    xabcde:{B:`AF ${jitter(26,0.1)}/min, angestrengt`,C:`Puls ${jitter(110,0.1)}/min, unregelmäßig`,D:'Wach, sehr ängstlich'},
+    sampler:{S:'Starker Brustschmerz, ausstrahlend in linken Arm',P:'Bekannte Herzerkrankung',E:'Internistisches Ereignis unter Stress der Lage, kein Trauma'},
+    vitals:{puls:jitter(110,0.1)+'/min',blutdruck:jitter(95,0.08)+'/60 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(89,0.03)+'%'},
+    scores:{news2:'8',qsofa:'1'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient ringt nach Luft, pfeifendes Atemgeräusch hörbar, Lippen zunehmend bläulich.',
+    befunde:'Schwerer Asthmaanfall (Status asthmaticus), deutlich verlängertes Exspirium, Erschöpfung der Atemmuskulatur.',
+    xabcde:{B:`AF ${jitter(34,0.1)}/min, exspiratorisches Giemen`,C:`Puls ${jitter(128,0.08)}/min`,D:'Wach, sehr erschöpft'},
+    sampler:{S:'Zunehmende Atemnot',P:'Bekanntes Asthma bronchiale',E:'Verschlechterung durch Rauch-/Staubexposition'},
+    vitals:{puls:jitter(128,0.08)+'/min',blutdruck:jitter(118,0.06)+'/76 mmHg',af:jitter(34,0.1)+'/min',spo2:jitter(84,0.03)+'%'},
+    scores:{news2:'8'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt am Boden, ${side} Arm auf Höhe des Ellenbogens fast vollständig abgetrennt.`,
+    befunde:`Subtotale Amputation des ${side} Unterarms, kontrollierbare, aber erhebliche Blutung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Subtotale Amputation, Blutung notdürftig gestillt'},
+    xabcde:{X:'Erhebliche Blutung, notdürftig komprimiert',C:`Puls ${jitter(122,0.08)}/min, blass`,D:'Wach, starke Schmerzen'},
+    sampler:{S:'Extreme Schmerzen, NRS 10/10',E:'Einklemmung durch Maschinenteil/Trümmer'},
+    vitals:{puls:jitter(122,0.08)+'/min',blutdruck:jitter(98,0.07)+'/62 mmHg',af:jitter(24,0.08)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt reglos im Uferbereich, wurde soeben von Ersthelfern geborgen, atmet stoßweise.',
+    befunde:'Zustand nach Beinahe-Ertrinken, Wasser in den Atemwegen, unregelmäßige, angestrengte Atmung.',
+    xabcde:{A:'Teilweise verlegt, gurgelnde Atemgeräusche',B:`AF ${jitter(30,0.1)}/min, unregelmäßig`,C:`Puls ${jitter(112,0.08)}/min`,D:'Somnolent, GCS 11'},
+    sampler:{S:'Nicht erhebbar (somnolent)',E:'Beinahe-Ertrinken'},
+    vitals:{puls:jitter(112,0.08)+'/min',blutdruck:jitter(105,0.06)+'/68 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(80,0.04)+'%'},
+    scores:{gcs:'11',news2:'8'}}),
+  ()=>{ const side=pick(['linke','rechte']);
+    return mkBase('rot',{ersteindruck:`Patient liegt seitlich, ${side} Thoraxhälfte bewegt sich paradox bei der Atmung.`,
+    befunde:`Instabiler Thorax (Rippenserienfraktur) ${side}, paradoxe Atembewegung, zunehmende Atemnot.`,
+    koerper:{thoraxVorne:'Instabile Thoraxwand, paradoxe Atmung'},
+    xabcde:{B:`AF ${jitter(30,0.1)}/min, paradoxe Bewegung`,C:`Puls ${jitter(124,0.08)}/min`,D:'Wach, starke Schmerzen bei Atmung'},
+    sampler:{S:'Starke atemabhängige Schmerzen',E:'Sturz/Anprall gegen Trümmerteile'},
+    vitals:{puls:jitter(124,0.08)+'/min',blutdruck:jitter(100,0.07)+'/64 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(88,0.03)+'%',rekap:'3 Sek.'},
+    scores:{news2:'7'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt reglos, Gesicht und Hals deutlich geschwollen, Atmung zunehmend erschwert nach Insektenstich.',
+    befunde:'Verdacht auf schwere allergische Reaktion (Anaphylaxie), Schwellung im Gesicht-/Halsbereich, zunehmende Atemnot.',
+    koerper:{kopf:'Deutliche Schwellung im Gesicht'},
+    xabcde:{A:'Zunehmend verlegt durch Schwellung',B:`AF ${jitter(28,0.1)}/min, stridorös`,C:`Puls ${jitter(130,0.08)}/min`,D:'Wach, sehr unruhig'},
+    sampler:{A:'Bekannte Insektengiftallergie',S:'Zunehmende Atemnot, Hautausschlag',E:'Insektenstich während der Lage'},
+    vitals:{puls:jitter(130,0.08)+'/min',blutdruck:jitter(85,0.08)+'/55 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(87,0.03)+'%'},
+    scores:{news2:'8'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt auf dem Rücken, keine Bewegung der Beine erkennbar, klagt über Gefühllosigkeit.',
+    befunde:'Verdacht auf Wirbelsäulentrauma mit Querschnittsymptomatik, keine Motorik/Sensibilität unterhalb der Verletzung.',
+    xabcde:{C:`Puls ${jitter(70,0.1)}/min, auffällig niedrig (neurogener Schock möglich)`,D:'Wach, Gefühllosigkeit beider Beine'},
+    sampler:{S:'Kein Gefühl in den Beinen',E:'Sturz aus großer Höhe auf den Rücken'},
+    vitals:{puls:jitter(70,0.1)+'/min',blutdruck:jitter(85,0.08)+'/55 mmHg',af:jitter(20,0.08)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{news2:'5'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt am Boden, starker Chemikaliengeruch, Haut im Kontaktbereich gerötet und blasenbildend.',
+    befunde:'Großflächige chemische Verätzung am Rumpf, beginnende Kreislaufreaktion durch Schmerz.',
+    koerper:{thoraxVorne:'Chemische Verätzung, Blasenbildung'},
+    xabcde:{B:`AF ${jitter(24,0.08)}/min`,C:`Puls ${jitter(116,0.08)}/min`,D:'Wach, starke Schmerzen'},
+    sampler:{S:'Brennende Schmerzen am Rumpf',E:'Kontakt mit ausgelaufener Chemikalie'},
+    vitals:{puls:jitter(116,0.08)+'/min',blutdruck:jitter(105,0.07)+'/68 mmHg',af:jitter(24,0.08)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{news2:'6'}})
 ];
 
 // ---- Erwachsene: BLAU (sehr schwer, kaum überlebensfähig unter Übungsbedingungen) ----
@@ -538,7 +661,47 @@ const TPL_ERW_BLAU = [
     xabcde:{X:'Massive, nicht kontrollierbare Blutung',C:`Puls ${jitter(150,0.1)}/min, kaum tastbar`,D:'GCS 4'},
     sampler:{S:'Keine Anamnese möglich',E:'Verschüttung, Trümmerlage'},
     vitals:{puls:jitter(150,0.1)+'/min',blutdruck:jitter(60,0.12)+'/35 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(75,0.06)+'%',rekap:'>4 Sek.'},
-    scores:{gcs:'4',news2:'9'}})
+    scores:{gcs:'4',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, ausgedehnte innere Verletzungen nach längerer Verschüttung vermutet, kaum Reaktion auf Schmerzreize.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Verdacht auf ausgedehnte innere Verletzungen nach längerer Verschüttung, Kreislauf stark dekompensiert.',
+    koerper:{thoraxVorne:'Quetschverletzung nach Verschüttung'},
+    xabcde:{X:'Innere Blutung wahrscheinlich',B:`AF ${jitter(9,0.15)}/min, unregelmäßig`,C:`Puls ${jitter(145,0.1)}/min, kaum tastbar`,D:'GCS 4, kaum Reaktion auf Schmerzreiz'},
+    sampler:{S:'Keine Anamnese möglich',E:'Längere Verschüttung unter Trümmern'},
+    vitals:{puls:jitter(145,0.1)+'/min',blutdruck:jitter(65,0.1)+'/40 mmHg',af:jitter(9,0.15)+'/min',spo2:jitter(74,0.05)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'4',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, massive Kopfverletzung, nur noch vereinzelte Schnappatmung erkennbar.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Schweres Schädel-Hirn-Trauma mit Schnappatmung, keine gezielte Reaktion auf Ansprache oder Schmerzreiz.',
+    koerper:{kopf:'Schwere Kopfverletzung'},
+    xabcde:{A:'Frei, aber keine Schutzreflexe',B:`AF ${jitter(6,0.2)}/min, Schnappatmung`,C:`Puls ${jitter(45,0.15)}/min, sehr schwach`,D:'GCS 3'},
+    sampler:{S:'Keine Anamnese möglich',E:'Sturz aus großer Höhe'},
+    vitals:{puls:jitter(45,0.15)+'/min',blutdruck:jitter(65,0.1)+'/35 mmHg',af:jitter(6,0.2)+'/min',spo2:jitter(72,0.06)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'3',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, starke innere und äußere Blutung durch multiple Splitterverletzungen.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Multiple Splitterverletzungen mit schwer kontrollierbarer Blutung, Kreislauf massiv dekompensiert.',
+    koerper:{thoraxVorne:'Multiple Splitterverletzungen',beinRechts:'Multiple Splitterverletzungen'},
+    xabcde:{X:'Multiple, schwer kontrollierbare Blutungsquellen',C:`Puls ${jitter(148,0.1)}/min, kaum tastbar`,D:'GCS 4'},
+    sampler:{S:'Keine Anamnese möglich',E:'Explosion, Splitterwirkung'},
+    vitals:{puls:jitter(148,0.1)+'/min',blutdruck:jitter(60,0.1)+'/35 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(76,0.05)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'4',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos unter eingestürztem Bauteil, Brustkorb sichtbar deformiert, kaum Eigenatmung.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Massive Thoraxquetschung mit kaum vorhandener Eigenatmung, Kreislauf hochgradig instabil.',
+    koerper:{thoraxVorne:'Massive Quetschung, sichtbare Deformierung'},
+    xabcde:{B:`AF ${jitter(7,0.2)}/min, sehr flach`,C:`Puls ${jitter(140,0.1)}/min, kaum tastbar`,D:'GCS 3'},
+    sampler:{S:'Keine Anamnese möglich',E:'Einsturz, Verschüttung unter Bauteil'},
+    vitals:{puls:jitter(140,0.1)+'/min',blutdruck:jitter(60,0.12)+'/35 mmHg',af:jitter(7,0.2)+'/min',spo2:jitter(70,0.06)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'3',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, schwere Rauchgasvergiftung mit tiefer Bewusstlosigkeit, kaum Eigenatmung.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Schwere Rauchgas-/CO-Vergiftung mit tiefer Bewusstlosigkeit und respiratorischer Erschöpfung.',
+    koerper:{kopf:'Rußspuren um Mund und Nase'},
+    xabcde:{A:'Verlegt durch Ruß/Schwellung',B:`AF ${jitter(8,0.2)}/min, sehr flach`,C:`Puls ${jitter(135,0.1)}/min`,D:'GCS 3'},
+    sampler:{S:'Keine Anamnese möglich',E:'Längere Rauchgasexposition in geschlossenem Raum'},
+    vitals:{puls:jitter(135,0.1)+'/min',blutdruck:jitter(70,0.1)+'/40 mmHg',af:jitter(8,0.2)+'/min',spo2:jitter(65,0.06)+'%',co:jitter(45,0.1)+'%'},
+    scores:{gcs:'3',news2:'9'}})
 ];
 
 // ---- Erwachsene: SCHWARZ (verstorben) ----
@@ -555,6 +718,34 @@ const TPL_ERW_SCHWARZ = [
     befunde:'Verletzungsmuster eindeutig nicht überlebensfähig, keine Vitalzeichen feststellbar.',
     xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion'},
     sampler:{S:'Nicht erhebbar',E:'Schwere Krafteinwirkung im Rahmen der Lage'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar'},
+    scores:{gcs:'3'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos unter eingestürzten Bauteilen, bei Bergung keine Vitalzeichen feststellbar.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Keine Atmung, kein Puls, Verletzungsmuster mit dem Leben nicht vereinbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion, GCS 3'},
+    sampler:{S:'Nicht erhebbar',E:'Verschüttung unter eingestürzten Bauteilen'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar',rekap:'nicht beurteilbar'},
+    scores:{gcs:'3',news2:'nicht ermittelbar'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos, ausgedehnte Verbrennungen am gesamten Körper, keine Lebenszeichen bei Auffinden.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Schwerste Verbrennungen, keine Atmung, kein Puls feststellbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion'},
+    sampler:{S:'Nicht erhebbar',E:'Explosion mit Brandfolge'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar'},
+    scores:{gcs:'3'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos neben verunfalltem Fahrzeug, keine Reaktion auf Ansprache oder Schmerzreiz feststellbar.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Multiple schwerste Verletzungen, keine Atmung, kein Puls tastbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion, GCS 3'},
+    sampler:{S:'Nicht erhebbar',E:'Verkehrsunfall im Rahmen der Lage'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar'},
+    scores:{gcs:'3'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos unter schwerem Trümmerteil, bei Bergung bereits keine Kreislaufzeichen.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Massive Quetschverletzung des Rumpfes, keine Atmung, kein Puls feststellbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion, GCS 3'},
+    sampler:{S:'Nicht erhebbar',E:'Verschüttung unter schwerem Trümmerteil'},
     vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar'},
     scores:{gcs:'3'}})
 ];
@@ -573,7 +764,7 @@ const TPL_ERW_GELB = [
     koerper:{thoraxVorne:'Prellmarke, Druckschmerz'},
     sampler:{S:'Schmerzen beim Einatmen',E:'Anprall gegen Gegenstand'},
     vitals:{puls:jitter(96,0.06)+'/min',blutdruck:jitter(130,0.05)+'/84 mmHg',af:jitter(20,0.08)+'/min',spo2:jitter(96,0.01)+'%'}}),
-  ()=>mkBase('gelb',{ersteindruck:'Patient steht benommen, hält sich eine blutende Wunde am Kopf, war laut Umstehenden kurz bewusstlos.',
+  ()=>mkBase('gelb',{ersteindruck:'Patient sitzt benommen, hält sich eine blutende Wunde am Kopf, war laut Umstehenden kurz bewusstlos.',
     befunde:'Platzwunde am Kopf, kurze Bewusstlosigkeit (Amnesie), aktuell wach und orientiert.',
     koerper:{kopf:'Platzwunde, versorgt'},
     xabcde:{D:'Wach, orientiert, Z.n. kurzer Bewusstlosigkeit'},
@@ -592,7 +783,7 @@ const TPL_ERW_GELB = [
     koerper:{[side==='linken'?'armLinks':'armRechts']:'Verbrennung 2. Grades, ca. handtellergroß'},
     sampler:{S:'Brennende Schmerzen Unterarm',E:'Kontakt mit heißer Oberfläche'},
     vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(124,0.05)+'/78 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
-  ()=>mkBase('gelb',{ersteindruck:'Patient läuft humpelnd, deutlich sichtbare Prellungen an Armen und Beinen nach Sturz.',
+  ()=>mkBase('gelb',{ersteindruck:'Patient sitzt am Boden, deutlich sichtbare Prellungen an Armen und Beinen nach Sturz.',
     befunde:'Multiple Prellungen, keine relevanten Frakturen tastbar, Kreislauf stabil.',
     koerper:{beinLinks:'Prellmarke'},
     sampler:{S:'Schmerzen an mehreren Körperstellen',E:'Sturz über Hindernis'},
@@ -600,7 +791,7 @@ const TPL_ERW_GELB = [
   ()=>{ const side=pick(['linkes','rechtes']);
     return mkBase('gelb',{ersteindruck:`Patient sitzt am Boden, hält sich das ${side} Sprunggelenk, deutliche Schwellung.`,
     befunde:`Distorsion ${side} Sprunggelenk mit Schwellung, keine offene Verletzung.`,
-    gehfaehigkeit:'eingeschränkt gehfähig',
+    gehfaehigkeit:'nicht gehfähig',
     koerper:{[side==='linkes'?'beinLinks':'beinRechts']:'Schwellung Sprunggelenk'},
     sampler:{S:'Schmerzen Sprunggelenk',E:'Umknicken beim Laufen'},
     vitals:{puls:jitter(88,0.06)+'/min',blutdruck:jitter(122,0.05)+'/78 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
@@ -617,7 +808,98 @@ const TPL_ERW_GELB = [
   ()=>mkBase('gelb',{ersteindruck:'Patient wirkt blass und schwach, klagt über Schwindel beim Aufstehen.',
     befunde:'Kreislaufschwäche, vermutlich Flüssigkeitsmangel, keine äußeren Verletzungen.',
     sampler:{S:'Schwindel, Schwäche',E:'Längere Wartezeit ohne Flüssigkeitszufuhr'},
-    vitals:{puls:jitter(98,0.06)+'/min',blutdruck:jitter(102,0.06)+'/68 mmHg',af:jitter(18,0.07)+'/min',spo2:jitter(97,0.01)+'%'}})
+    vitals:{puls:jitter(98,0.06)+'/min',blutdruck:jitter(102,0.06)+'/68 mmHg',af:jitter(18,0.07)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält den ${side} Fuß fest, deutliche Schwellung, kann nicht auftreten.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Verdacht auf Mittelfußfraktur ${side}, starke Schwellung, kann nicht belasten.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Verdacht auf Fraktur, Schwellung'},
+    sampler:{S:'Starke Schmerzen beim Belasten',E:'Herabfallender Gegenstand auf den Fuß'},
+    vitals:{puls:jitter(94,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient hustet anhaltend, Augen gerötet und tränend, war kurzzeitig in dichtem Rauch.',
+    befunde:'Mittelgradige Rauchgasexposition, Reizung der Atemwege, Sättigung leicht erniedrigt.',
+    xabcde:{B:`AF ${jitter(24,0.08)}/min`},
+    sampler:{S:'Hustenreiz, tränende Augen',E:'Rauchexposition'},
+    vitals:{puls:jitter(98,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(24,0.08)+'/min',spo2:jitter(94,0.02)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält die ${side} Rippenregion, atmet spürbar flacher als üblich.`,
+    befunde:`Verdacht auf einzelne Rippenfraktur ${side}, atemabhängiger Druckschmerz, keine Atemnot in Ruhe.`,
+    koerper:{thoraxVorne:'Druckschmerz, Verdacht auf Rippenfraktur'},
+    sampler:{S:'Atemabhängiger Schmerz',E:'Sturz gegen Kante'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(20,0.07)+'/min',spo2:jitter(96,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient hält sich den Nacken, berichtet über Schmerzen nach ruckartiger Bewegung.',
+    befunde:'Verdacht auf Halswirbelsäulen-Distorsion (Schleudertrauma), keine neurologischen Ausfälle.',
+    koerper:{},
+    sampler:{S:'Nackenschmerzen, Bewegungseinschränkung',E:'Ruckartige Bewegung beim Ausweichen'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(98,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält sich das ${side} Auge, tränt stark, kann es kaum öffnen.`,
+    befunde:`Fremdkörper/Reizung am ${side} Auge, deutlicher Tränenfluss, Sehschärfe subjektiv vermindert.`,
+    sampler:{S:'Starkes Brennen im Auge',E:'Staub-/Splitterexposition'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(124,0.05)+'/80 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient sitzt zusammengesunken, klagt über zunehmende Übelkeit und Kopfschmerzen ohne erkennbares Trauma.',
+    befunde:'Verdacht auf Kreislaufdysregulation, keine äußeren Verletzungen, leicht reduzierter Allgemeinzustand.',
+    sampler:{S:'Übelkeit, Kopfschmerzen',E:'Kein Trauma, internistisches Beschwerdebild'},
+    vitals:{puls:jitter(102,0.06)+'/min',blutdruck:jitter(100,0.06)+'/65 mmHg',af:jitter(19,0.07)+'/min',spo2:jitter(96,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält den ${side} Ellenbogen in Schonhaltung, deutliche Schwellung sichtbar.`,
+    befunde:`Verdacht auf Ellenbogenfraktur ${side}, Schwellung, schmerzbedingte Schonhaltung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Schwellung, Verdacht auf Fraktur'},
+    sampler:{S:'Schmerzen Ellenbogen',E:'Sturz auf den Arm'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält das ${side} Schlüsselbein, deutliche Fehlstellung sichtbar, stützt den Arm ab.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Verdacht auf Klavikulafraktur ${side}, tastbare Stufenbildung, periphere Durchblutung intakt.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Verdacht auf Klavikulafraktur'},
+    sampler:{S:'Schmerzen beim Bewegen des Arms',E:'Sturz auf die Schulter'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient sitzt am Boden, ${side} Knie stark geschwollen, kann es nicht durchstrecken.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Verdacht auf Knieverletzung (Band-/Fraktur) ${side}, deutliche Schwellung, Bewegungseinschränkung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Schwellung, Bewegungseinschränkung'},
+    sampler:{S:'Starke Knieschmerzen',E:'Verdrehung des Knies beim Ausweichen'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(124,0.05)+'/78 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient hält sich benommen den Kopf, keine Bewusstlosigkeit, klagt über Schwindel und Übelkeit.',
+    befunde:'Verdacht auf leichte Gehirnerschütterung ohne Bewusstseinsverlust, Übelkeit, Kopfschmerzen.',
+    xabcde:{D:'Wach, orientiert, aber Kopfschmerzen und Schwindel'},
+    sampler:{S:'Kopfschmerzen, Schwindel, Übelkeit',E:'Anprall des Kopfes gegen Gegenstand'},
+    vitals:{puls:jitter(88,0.06)+'/min',blutdruck:jitter(124,0.05)+'/80 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(98,0.01)+'%'},
+    scores:{gcs:'15',news2:'1'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient zeigt eine tiefe, klaffende Schnittwunde am ${side} Unterschenkel, mäßige Blutung.`,
+    befunde:`Tiefe Schnittwunde ${side} Unterschenkel, Blutung durch Druckverband kontrolliert, keine Fraktur tastbar.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Tiefe Schnittwunde, Blutung kontrolliert'},
+    sampler:{S:'Brennender Schmerz an der Wunde',E:'Schnittverletzung durch scharfkantiges Trümmerteil'},
+    vitals:{puls:jitter(96,0.06)+'/min',blutdruck:jitter(122,0.05)+'/78 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient zittert stark, Haut kühl, berichtet über längeren Aufenthalt im Freien bei kaltem Wetter.',
+    befunde:'Beginnende Unterkühlung (Hypothermie Grad I-II), Patient zittert, Bewusstsein klar.',
+    xabcde:{D:'Wach, orientiert, deutliches Kältezittern'},
+    sampler:{S:'Kälteempfinden, Zittern',E:'Längere Kälteexposition ohne Schutzkleidung'},
+    vitals:{puls:jitter(84,0.06)+'/min',blutdruck:jitter(118,0.05)+'/76 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(96,0.01)+'%',temp:'34,8°C'},
+    scores:{news2:'3'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält die ${side} Hand fest umwickelt, ein Finger fehlt sichtbar.`,
+    befunde:`Amputation eines Fingers der ${side} Hand, Blutung durch Verband kontrolliert.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Fingeramputation, Blutung kontrolliert'},
+    sampler:{S:'Starke Schmerzen an der Hand',E:'Einklemmung in Trümmerteilen'},
+    vitals:{puls:jitter(98,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient spuckt Blut, hält sich den Mund, zwei Zähne sichtbar ausgeschlagen.',
+    befunde:'Zahnverlust und Weichteilverletzung im Mundbereich, Atemweg frei, Blutung mäßig.',
+    koerper:{kopf:'Weichteilverletzung Mundbereich, Zahnverlust'},
+    sampler:{S:'Schmerzen im Mundbereich',E:'Anprall des Gesichts gegen Gegenstand'},
+    vitals:{puls:jitter(96,0.06)+'/min',blutdruck:jitter(124,0.05)+'/80 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient hält sich den Rücken, kann sich nur unter Schmerzen aufrichten, keine Lähmungserscheinungen.',
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:'Verdacht auf Wirbelkörperprellung/-fraktur ohne neurologische Ausfälle, deutlicher Bewegungsschmerz.',
+    sampler:{S:'Rückenschmerzen bei Bewegung',E:'Sturz auf den Rücken'},
+    vitals:{puls:jitter(94,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient klagt über starke Bauchschmerzen im rechten Unterbauch, kein Trauma erkennbar.',
+    befunde:'Verdacht auf akutes internistisches Abdomen (z.B. Appendizitis), kein Zusammenhang mit der Schadenslage, stabiler Kreislauf.',
+    sampler:{S:'Zunehmende Bauchschmerzen rechts unten',E:'Kein Trauma, bereits vor der Lage bestehende Beschwerden'},
+    vitals:{puls:jitter(100,0.06)+'/min',blutdruck:jitter(118,0.05)+'/76 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%',temp:'37,8°C'},
+    scores:{news2:'2'}})
 ];
 
 // ---- Erwachsene: GRÜN ----
@@ -666,7 +948,103 @@ const TPL_ERW_GRUEN = [
     befunde:'Prellmarke am Rumpf, keine Atemnot, keine relevanten Beschwerden.',
     koerper:{thoraxVorne:'Prellmarke'},
     sampler:{E:'Leichter Anprall'},
-    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}})
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, klagt über leichte Schmerzen am ${side} Ellenbogen nach Streifschuss durch Trümmerteile.`,
+    befunde:`Oberflächliche Schürfwunde am ${side} Ellenbogen, keine Bewegungseinschränkung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Oberflächliche Schürfwunde'},
+    sampler:{E:'Streifende Trümmerteile'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht abseits, wirkt gefasst, berichtet über leichtes Ohrensausen nach der Explosion.',
+    befunde:'Leichtes Ohrensausen (Tinnitus) nach Explosionsknall, kein Blut im Gehörgang, sonst unauffällig.',
+    sampler:{S:'Leichtes Ohrensausen',E:'Explosionsknall in der Nähe'},
+    vitals:{puls:jitter(86,0.05)+'/min',blutdruck:jitter(124,0.04)+'/80 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient läuft selbstständig, zeigt eine kleine Rißwunde in der Kleidung ohne Hautverletzung darunter.',
+    befunde:'Keine Verletzung feststellbar, lediglich beschädigte Kleidung, Patient körperlich unauffällig.',
+    sampler:{E:'Vorbeifliegende Trümmerteile'},
+    vitals:{puls:jitter(78,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt eine kleine Beule am ${side} Schienbein.`,
+    befunde:`Kleines Hämatom am ${side} Schienbein, keine Schwellung, volle Beweglichkeit.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Kleines Hämatom'},
+    sampler:{E:'Anstoßen an Trümmerteil'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient sitzt ruhig, klagt über leichten Durst und Erschöpfung nach längerem Warten in der Sonne.',
+    befunde:'Leichte Erschöpfung, keine Verletzung, ausreichend ansprechbar und orientiert.',
+    sampler:{S:'Erschöpfung, Durst',E:'Längerer Aufenthalt ohne Schatten'},
+    vitals:{puls:jitter(90,0.05)+'/min',blutdruck:jitter(116,0.04)+'/74 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(98,0.01)+'%',temp:'37,6°C'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, zittert leicht vor Aufregung, körperlich unverletzt.',
+    befunde:'Leichtes Zittern durch Aufregung, keine körperliche Verletzung feststellbar.',
+    sampler:{S:'Nervosität, Zittern',E:'Miterleben des Ereignisses aus der Nähe'},
+    vitals:{puls:jitter(96,0.05)+'/min',blutdruck:jitter(130,0.04)+'/84 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt einen kleinen Kratzer am ${side} Handrücken.`,
+    befunde:`Oberflächlicher Kratzer am ${side} Handrücken, keine Blutung mehr.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Oberflächlicher Kratzer'},
+    sampler:{E:'Abstützen beim Sturz'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, hält sich leicht hustend den Hals, war kurz Reizgas ausgesetzt.',
+    befunde:'Leichte Reizung der oberen Atemwege durch Rauch/Staub, keine Atemnot, Sättigung normwertig.',
+    sampler:{S:'Leichter Hustenreiz',E:'Kurzzeitige Rauch-/Staubexposition'},
+    vitals:{puls:jitter(88,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient steht, hält sich das ${side} Ohr, kleine oberflächliche Verletzung sichtbar.`,
+    befunde:`Kleine oberflächliche Verletzung am ${side} Ohr, keine relevante Blutung.`,
+    sampler:{E:'Streifende Splitterwirkung'},
+    vitals:{puls:jitter(82,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient sitzt am Boden, wirkt aufgeregt, aber körperlich unverletzt, möchte sofort helfen.',
+    befunde:'Keine körperliche Verletzung feststellbar, psychisch aufgewühlt durch das Ereignis.',
+    sampler:{S:'Aufregung, kein Schmerz',E:'Augenzeuge des Ereignisses'},
+    vitals:{puls:jitter(92,0.05)+'/min',blutdruck:jitter(126,0.04)+'/80 mmHg',af:jitter(17,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, klagt über einen leichten Druckschmerz an der ${side} Hüfte.`,
+    befunde:`Leichte Prellung der ${side} Hüfte, freie Beweglichkeit, keine Schwellung.`,
+    sampler:{E:'Leichter Anprall gegen Gegenstand'},
+    vitals:{puls:jitter(82,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, zeigt Staub- und Schmutzspuren im Gesicht, sonst unauffällig.',
+    befunde:'Keine Verletzung feststellbar, lediglich Verschmutzung durch Staub, Patient allseits orientiert.',
+    sampler:{E:'Staubentwicklung in der Nähe'},
+    vitals:{puls:jitter(78,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt eine kleine Prellmarke am ${side} Knöchel.`,
+    befunde:`Kleine Prellmarke am ${side} Knöchel, keine Schwellung, volle Belastbarkeit.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Kleine Prellmarke'},
+    sampler:{E:'Leichtes Umknicken'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient sitzt ruhig auf einer Bordsteinkante, klagt über leichte Übelkeit nach dem Schreck.',
+    befunde:'Leichte Übelkeit ohne Erbrechen, keine körperliche Verletzung, Kreislauf stabil.',
+    sampler:{S:'Leichte Übelkeit',E:'Schreckreaktion'},
+    vitals:{puls:jitter(88,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt eine kleine Platzwunde am ${side} Kinn.`,
+    befunde:`Kleine, nicht mehr blutende Platzwunde am Kinn, keine weiteren Auffälligkeiten.`,
+    koerper:{kopf:'Kleine Platzwunde am Kinn'},
+    sampler:{E:'Leichter Sturz auf ebenem Untergrund'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, berichtet über kurzzeitigen Schwindel, der bereits wieder abgeklungen ist.',
+    befunde:'Kurzzeitiger, bereits abgeklungener Schwindel, keine Verletzung, aktuell beschwerdefrei.',
+    sampler:{S:'Kurzzeitiger Schwindel, jetzt abgeklungen',E:'Kreislaufreaktion durch Aufregung'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(112,0.04)+'/72 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt eine kleine Schwellung am ${side} Zeigefinger.`,
+    befunde:`Leichte Prellung des ${side} Zeigefingers, freie Beweglichkeit, keine Fehlstellung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Leichte Fingerprellung'},
+    sampler:{E:'Einklemmen des Fingers'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht abseits, wirkt gefasst, keine sichtbaren Verletzungen, war nur in der Nähe des Ereignisses.',
+    befunde:'Keine Verletzung feststellbar, Patient unversehrt, wird zur Beobachtung mit erfasst.',
+    sampler:{E:'In der Nähe des Ereignisortes'},
+    vitals:{puls:jitter(76,0.05)+'/min',blutdruck:jitter(116,0.04)+'/74 mmHg',af:jitter(13,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, klagt über einen leichten Muskelkater im ${side} Bein nach dem Weglaufen.`,
+    befunde:`Muskuläre Verspannung im ${side} Bein, keine strukturelle Verletzung, volle Belastbarkeit.`,
+    sampler:{E:'Schnelles Weglaufen von der Gefahrenstelle'},
+    vitals:{puls:jitter(90,0.05)+'/min',blutdruck:jitter(124,0.04)+'/80 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient sitzt ruhig, zeigt kleine Rötungen der Haut, keine Blasenbildung.',
+    befunde:'Oberflächliche Hautrötung (Verbrennung Grad I) an kleiner Fläche, keine Blasenbildung.',
+    koerper:{armRechts:'Oberflächliche Hautrötung'},
+    sampler:{E:'Kurzer Kontakt mit heißer Oberfläche'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}})
 ];
 
 // ---- Kinder: gemeinsame Vorlagen für Baby/Kleinkind/Schulkind (Gelb/Grün) ----
@@ -691,7 +1069,23 @@ const TPL_KIND_GELB = [
     befunde:`Schwellung ${side} Handgelenk, Verdacht auf Fraktur.`,
     koerper:{[side==='linke'?'armLinks':'armRechts']:'Schwellung, Verdacht auf Fraktur'},
     xabcde:{D:'Wach, weinend'},
-    vitals:{af:jitter(22,0.08)+'/min',spo2:jitter(98,0.01)+'%'}});}
+    vitals:{af:jitter(22,0.08)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>{const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Kind hinkt, hält sich das ${side} Knie, deutliche Schwellung sichtbar.`,
+    befunde:`Schwellung und Bewegungseinschränkung am ${side} Knie, Verdacht auf Bänderverletzung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Schwellung, Bewegungseinschränkung'},
+    xabcde:{D:'Wach, weinend, ansprechbar'},
+    vitals:{af:jitter(22,0.08)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Kind hält sich den Brustkorb, atmet schmerzbedingt flach, keine äußere Verletzung sichtbar.',
+    befunde:'Prellung des Brustkorbs, atemabhängiger Schmerz, keine sichtbare äußere Verletzung.',
+    koerper:{thoraxVorne:'Prellmarke, Druckschmerz'},
+    xabcde:{B:`AF ${jitter(26,0.08)}/min, schmerzbedingt flach`,D:'Wach, weinend'},
+    vitals:{af:jitter(26,0.08)+'/min',spo2:jitter(96,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Kind sitzt weinend am Boden, zeigt eine Verbrennung an der Hand, Haut gerötet mit kleinen Blasen.',
+    befunde:'Verbrennung 2. Grades an der Hand, kleinflächig, deutlicher Schmerz.',
+    koerper:{armLinks:'Verbrennung 2. Grades, kleinflächig'},
+    xabcde:{D:'Wach, weinend, starke Schmerzen'},
+    vitals:{af:jitter(24,0.08)+'/min',spo2:jitter(97,0.01)+'%'}})
 ];
 const TPL_KIND_GRUEN = [
   ()=>mkBase('gruen',{ersteindruck:'Kind weint, zeigt oberflächliche Schürfwunden an Knie und Ellenbogen.',
@@ -712,7 +1106,74 @@ const TPL_KIND_GRUEN = [
     befunde:'Oberflächliche, spontan sistierte Schürfwunde, Kind unauffällig und ansprechbar.',
     koerper:{armRechts:'Oberflächliche Schürfwunde'},
     xabcde:{D:'Wach, ansprechbar'},
-    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}})
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind steht bei der Bezugsperson, zeigt einen kleinen Kratzer am Bein, spielt bereits weiter.',
+    befunde:'Oberflächlicher Kratzer am Bein, keine Blutung mehr, Kind unauffällig.',
+    koerper:{beinRechts:'Oberflächlicher Kratzer'},
+    xabcde:{D:'Wach, unauffällig, spielt bereits wieder'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind hält sich das Ohr, klagt kurz über Ohrensausen nach dem lauten Knall, sonst unauffällig.',
+    befunde:'Leichtes Ohrensausen nach Explosionsknall, kein Blut im Gehörgang, sonst unauffällig.',
+    xabcde:{D:'Wach, unauffällig'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind sitzt bei der Bezugsperson, wirkt aufgeregt und weint leise, körperlich unverletzt.',
+    befunde:'Keine körperliche Verletzung feststellbar, Kind emotional aufgewühlt durch das Ereignis.',
+    xabcde:{D:'Wach, weinend, aber ansprechbar'},
+    vitals:{af:jitter(24,0.07)+'/min',spo2:jitter(99,0.01)+'%'}})
+];
+
+const TPL_KIND_ROT = [
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Kind liegt am Boden, hält sich schreiend den ${side} Oberschenkel, deutliche Fehlstellung.`,
+    befunde:`Geschlossene Oberschenkelfraktur ${side}, Kreislaufreaktion durch Schmerz und Blutverlust in den Muskel.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Geschlossene Fraktur, deutliche Schwellung'},
+    xabcde:{B:`AF ${jitter(28,0.1)}/min`,C:`Puls ${jitter(135,0.08)}/min, blass`,D:'Wach, weinend, starke Schmerzen'},
+    sampler:{S:'Starke Schmerzen, NRS 8/10',E:'Sturz/Trümmerlage'},
+    vitals:{puls:jitter(135,0.08)+'/min',blutdruck:jitter(95,0.07)+'/60 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>mkBase('rot',{ersteindruck:'Kind liegt benommen am Boden, hustet stark, Ruß im Gesicht, war in stark verrauchtem Raum.',
+    befunde:'Rußspuren um Mund und Nase, zunehmende Atemnot, beginnende Bewusstseinstrübung.',
+    koerper:{kopf:'Rußspuren um Mund/Nase'},
+    xabcde:{A:'Verdacht auf Inhalationstrauma, heisere Stimme',B:`AF ${jitter(32,0.1)}/min`,C:`Puls ${jitter(130,0.08)}/min`,D:'Zunehmend somnolent, GCS 13'},
+    sampler:{S:'Hustenreiz, Atemnot',E:'Rauchgasexposition in geschlossenem Raum'},
+    vitals:{puls:jitter(130,0.08)+'/min',blutdruck:jitter(100,0.06)+'/65 mmHg',af:jitter(32,0.1)+'/min',spo2:jitter(87,0.03)+'%',co:jitter(15,0.15)+'%'},
+    scores:{gcs:'13',news2:'7'}}),
+  ()=>mkBase('rot',{ersteindruck:'Kind liegt regungslos neben umgestürztem Gegenstand, blutet aus einer Kopfwunde.',
+    befunde:'Große Kopfplatzwunde, wiederholtes Erbrechen, verzögerte Reaktion auf Ansprache.',
+    koerper:{kopf:'Große Platzwunde, Schwellung, Blutung'},
+    xabcde:{B:`AF ${jitter(24,0.1)}/min`,C:`Puls ${jitter(128,0.08)}/min`,D:'Somnolent, GCS 12, wiederholtes Erbrechen'},
+    sampler:{S:'Kopfschmerzen, Übelkeit',E:'Sturz mit Kopfanprall'},
+    vitals:{puls:jitter(128,0.08)+'/min',blutdruck:jitter(105,0.07)+'/68 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{gcs:'12',news2:'6'}}),
+  ()=>mkBase('rot',{ersteindruck:'Kind sitzt gekrümmt am Boden, ringt sichtlich nach Luft, deutliche Zyanose der Lippen.',
+    befunde:'Einseitig abgeschwächtes Atemgeräusch, zunehmende Atemnot, Unruhe.',
+    koerper:{thoraxVorne:'Prellmarke, einseitig abgeschwächtes Atemgeräusch'},
+    xabcde:{B:`AF ${jitter(36,0.1)}/min, einseitig abgeschwächt`,C:`Puls ${jitter(140,0.08)}/min`,D:'Wach, sehr unruhig, ängstlich'},
+    sampler:{S:'Atemnot, Angst',E:'Sturz gegen Gegenstand, Thoraxanprall'},
+    vitals:{puls:jitter(140,0.08)+'/min',blutdruck:jitter(90,0.07)+'/58 mmHg',af:jitter(36,0.1)+'/min',spo2:jitter(85,0.03)+'%',rekap:'3 Sek.'},
+    scores:{news2:'8'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Kind liegt am Boden, ${side} Unterschenkel deutlich fehlgestellt, starke Blutung sichtbar.`,
+    befunde:`Offene Unterschenkelfraktur ${side} mit deutlicher Blutung, Kind blass und geschwächt.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Offene Fraktur, starke Blutung'},
+    xabcde:{X:`Deutliche Blutung am ${side} Unterschenkel`,C:`Puls ${jitter(138,0.08)}/min, blass`,D:'Wach, starke Schmerzen, ängstlich'},
+    sampler:{S:'Starke Schmerzen, NRS 9/10',E:'Sturz von umherfliegendem Trümmerteil getroffen'},
+    vitals:{puls:jitter(138,0.08)+'/min',blutdruck:jitter(92,0.07)+'/58 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(92,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>mkBase('rot',{ersteindruck:'Kind liegt reglos, deutliche Verbrennungen an Armen und Oberkörper, reagiert nur auf lautes Ansprechen.',
+    befunde:'Verbrennungen 2. Grades an Armen und Oberkörper, ca. 10% KOF, reduzierte Ansprechbarkeit.',
+    koerper:{thoraxVorne:'Verbrennung 2. Grades',armLinks:'Verbrennung 2. Grades'},
+    xabcde:{B:`AF ${jitter(30,0.1)}/min`,C:`Puls ${jitter(145,0.08)}/min`,D:'Reagiert nur auf lautes Ansprechen, GCS 11'},
+    sampler:{S:'Nur eingeschränkt erhebbar (reduzierte Ansprechbarkeit)',E:'Verbrühung/Verbrennung im Rahmen der Lage'},
+    vitals:{puls:jitter(145,0.08)+'/min',blutdruck:jitter(88,0.07)+'/56 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(90,0.02)+'%'},
+    scores:{gcs:'11',news2:'7'}}),
+  ()=>mkBase('rot',{ersteindruck:'Kind liegt auf dem Rücken, hält den Bauch, sehr blass und kaltschweißig, klagt über starke Bauchschmerzen.',
+    befunde:'Verdacht auf stumpfes Bauchtrauma mit innerer Blutung, deutliche Kreislaufreaktion.',
+    koerper:{thoraxVorne:'Druckschmerzhafter, gespannter Bauch'},
+    xabcde:{C:`Puls ${jitter(142,0.08)}/min, blass, kaltschweißig`,D:'Wach, starke Schmerzen, zunehmend unruhig'},
+    sampler:{S:'Starke Bauchschmerzen',E:'Anprall gegen Gegenstand'},
+    vitals:{puls:jitter(142,0.08)+'/min',blutdruck:jitter(85,0.07)+'/55 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'7'}})
 ];
 
 function ageAdjustForChild(patient, ageGroup){
@@ -739,9 +1200,10 @@ function buildOnePatient(id, ageGroup, origin, cat){
     pool = cat==='rot' ? TPL_ERW_ROT : cat==='blau' ? TPL_ERW_BLAU : cat==='schwarz' ? TPL_ERW_SCHWARZ
          : cat==='gelb' ? TPL_ERW_GELB : TPL_ERW_GRUEN;
   }else{
-    pool = cat==='gelb' ? TPL_KIND_GELB : TPL_KIND_GRUEN;
+    pool = cat==='rot' ? TPL_KIND_ROT : cat==='gelb' ? TPL_KIND_GELB : TPL_KIND_GRUEN;
   }
   const patient = pick(pool)();
+  patient.kategorieReal = cat; // Absicherung: die vorgesehene Zielkategorie hat immer Vorrang
   if(ageGroup!=='erwachsen') ageAdjustForChild(patient, ageGroup);
 
   let alter;
@@ -759,12 +1221,14 @@ function buildOnePatient(id, ageGroup, origin, cat){
 function seedPatients(){
   const total = 100;
   const usedNames = new Set();
+  const usedBefunde = new Set();
   const ageQueue = buildQuotaQueue(total, {baby:0.05, kleinkind:0.05, schulkind:0.05, erwachsen:0.85});
   const originQueue = buildQuotaQueue(total, {auslaendisch:0.10, deutsch:0.90});
 
   const childCount = ageQueue.filter(a=>a!=='erwachsen').length;
   const adultCount = total - childCount;
-  const childCatQueue = buildQuotaQueue(childCount, {gelb:0.5, gruen:0.5});
+  // Kinder: zu gleichen Teilen Grün/Gelb/Rot (Rot fehlte hier bisher komplett).
+  const childCatQueue = buildQuotaQueue(childCount, {gruen:1/3, gelb:1/3, rot:1/3});
   const adultGroupQueue = buildQuotaQueue(adultCount, {rotgroup:34/adultCount, gelb:25/adultCount, gruen:26/adultCount});
   const rotgroupCount = adultGroupQueue.filter(g=>g==='rotgroup').length;
   const rotSplitQueue = buildQuotaQueue(rotgroupCount, {rot:26/rotgroupCount, blau:4/rotgroupCount, schwarz:4/rotgroupCount});
@@ -781,7 +1245,14 @@ function seedPatients(){
       const g = adultGroupQueue[adultGroupI++];
       cat = g==='rotgroup' ? rotSplitQueue[rotSplitI++] : g;
     }
-    const patient = buildOnePatient(i+1, ageGroup, origin, cat);
+    // Bis zu 25 Versuche: verhindert, dass zwei Patienten dasselbe Verletzungsbild
+    // (identischer "befunde"-Text) erhalten. Jeder Versuch würfelt Vorlage/Seite neu.
+    let patient, tries=0;
+    do{
+      patient = buildOnePatient(i+1, ageGroup, origin, cat);
+      tries++;
+    }while(usedBefunde.has(patient.befunde) && tries<25);
+    usedBefunde.add(patient.befunde);
     const gender = patient.geschlecht;
     const [vorname, nachname] = pickUniqueName(origin, gender, usedNames);
     patient.vorname = vorname;
@@ -789,6 +1260,18 @@ function seedPatients(){
     patients.push(patient);
   }
   return patients;
+}
+
+// Erzeugt die 100 Standardpatienten neu (z.B. nach einem Update der Vorlagen mit mehr Vielfalt)
+// und ERSETZT damit die komplette aktuelle Patientendatenbank. Nur über den Admin-Bereich nutzbar,
+// erfordert eine explizite Bestätigung durch den Admin.
+async function regenerateDefault100(){
+  if(!confirm('Wirklich ALLE aktuellen Patienten löschen und durch 100 neu erzeugte Standardpatienten ersetzen? Bereits erfasste Sichtungsergebnisse, die sich auf jetzige Patienten-IDs beziehen, zeigen danach ggf. auf andere Patienten. Dieser Schritt kann nicht rückgängig gemacht werden.')) return;
+  St.patients = seedPatients();
+  const ok = await saveKeyRetry('patients', St.patients);
+  if(ok){ toast('100 Standardpatienten neu erzeugt'); }
+  else{ toast('Fehler beim Speichern der neuen Patienten'); }
+  render();
 }
 
 /* ====================== NAV ====================== */
@@ -1156,7 +1639,7 @@ async function generatePatientsAI(count, scenario, pctRot, pctGelb, pctGruen){
 "vitals":{"puls":"","blutdruck":"","rekap":"","af":"","spo2":"","bz":"","temp":"","etco2":"","hb":"","co":"","spmet":""},
 "scores":{"gcs":"","befast":"","news2":"","nexus":"","qsofa":"","spesi":"","wells":"","apgar":""},
 "kategorieReal":"rot|gelb|gruen|blau|schwarz"}
-WICHTIG: Halte JEDEN Textwert sehr kurz und knapp (max. ca. 8-10 Wörter, Stichwort-Stil statt ganzer Sätze), damit die gesamte Antwort kurz bleibt. Alle Werte müssen trotzdem medizinisch realistisch und konsistent zum jeweiligen Verletzungs-/Erkrankungsbild sein. Nicht erhebbare/irrelevante Werte als "nicht ermittelbar" bzw. leerer String bei körper-Feldern ohne Verletzung. Halte dich STRIKT an die oben als verbindlich markierte Altersgruppe und Namensherkunft für diesen Patienten. Gelegentlich kann der Patient zusätzlich bewusstlos sein (dann Anamnesefelder "nicht erhebbar") – das ist unabhängig von Alter/Herkunft und optional. ${catHint} ${varietyHint} ${avoidHint} JEDER Patient muss sich in Name UND Verletzungsbild klar von allen bisherigen unterscheiden.`;
+WICHTIG: Halte JEDEN Textwert sehr kurz und knapp (max. ca. 8-10 Wörter, Stichwort-Stil statt ganzer Sätze), damit die gesamte Antwort kurz bleibt. Alle Werte müssen trotzdem medizinisch realistisch und konsistent zum jeweiligen Verletzungs-/Erkrankungsbild sein. Nicht erhebbare/irrelevante Werte als "nicht ermittelbar" bzw. leerer String bei körper-Feldern ohne Verletzung. Halte dich STRIKT an die oben als verbindlich markierte Altersgruppe und Namensherkunft für diesen Patienten. Gelegentlich kann der Patient zusätzlich bewusstlos sein (dann Anamnesefelder "nicht erhebbar") – das ist unabhängig von Alter/Herkunft und optional. ZWEI ZWINGENDE MEDIZINISCHE REGELN: (1) Das Feld "gehfaehigkeit" darf NUR bei kategorieReal="gruen" den Wert "gehfähig" enthalten – bei ALLEN anderen Kategorien (gelb, rot, blau, schwarz) MUSS es "nicht gehfähig" (oder eine Variante davon) sein, niemals "gehfähig". (2) Ist der Patient bewusstlos/reagiert nicht/regungslos, MUSS scores.gcs einen Wert von 3-8 haben und xabcde.D darf NICHT "wach"/"orientiert"/"GCS 15" enthalten – ein bewusstloser Patient hat NIEMALS GCS 15. ${catHint} ${varietyHint} ${avoidHint} JEDER Patient muss sich in Name UND Verletzungsbild klar von allen bisherigen unterscheiden.`;
 
     let ok = false;
     for(let attempt=1; attempt<=2 && !ok && !stopAll; attempt++){
@@ -1760,6 +2243,11 @@ function adminPatients(){
     ${(!St.aiBusy && St.aiLastError)?`<div class="value-box" style="border-color:var(--red);"><div class="lbl" style="color:var(--red)">Letzter Fehler bei der Generierung</div><div class="val" style="font-family:monospace;font-size:.82rem;word-break:break-word;">${St.aiLastError}</div></div>`:''}
     <p class="small">Hinweis: aus API-Limits werden Patienten in kleinen Chargen erzeugt, das kann bei großen Mengen etwas dauern.</p>
     <p class="small">Feste Altersverteilung je Lauf: 5% Baby, 5% Kleinkind, 5% Schulkind, 85% Erwachsene. Feste Namensherkunft: 10% ausländisch, 90% deutsch.</p>
+    <div class="divider"></div>
+    <p class="small"><b>100 Standardpatienten neu erzeugen:</b> ersetzt die komplette aktuelle Patientendatenbank
+      durch 100 frisch erzeugte Standardpatienten mit größerer Vorlagenvielfalt (nützlich, falls die aktuelle
+      Datenbank noch aus einer älteren Version mit ähnlicheren Verletzungsbildern stammt).</p>
+    <button class="btn btn-danger" onclick="regenerateDefault100()">🔄 100 Standardpatienten neu erzeugen (ersetzt alle)</button>
   </div>`;
 
   const qrBox = `
