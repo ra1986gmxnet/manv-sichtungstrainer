@@ -375,6 +375,47 @@ async function init(){
 
   if(St.user){ tryHandleDeepLink(); }
   render();
+  setupRealtimeSync();
+}
+
+// ====================== ECHTZEIT-SYNC FÜRS ÜBUNGSLEITER-COCKPIT ======================
+// Damit neu eingehende Sichtungsergebnisse (und Statusänderungen der Übung) im Cockpit
+// erscheinen, OHNE dass die Seite manuell neu geladen werden muss.
+let LAST_SICHT_JSON = null;
+let LAST_EX_JSON = null;
+
+function setupRealtimeSync(){
+  LAST_SICHT_JSON = JSON.stringify(St.sichtungen);
+  LAST_EX_JSON = JSON.stringify(St.exercises);
+
+  if(db){
+    // Echte Echtzeit-Updates über Firestore — Änderungen erscheinen praktisch sofort,
+    // auch wenn sie von einem anderen Gerät/Teilnehmer stammen.
+    db.collection('appdata').doc('sichtungen_index').onSnapshot(doc=>{
+      if(doc.exists){
+        try{ St.sichtungen = JSON.parse(doc.data().value); }catch(e){}
+        if(St.route==='cockpit') render();
+      }
+    }, err=>console.error('Sichtungen-Live-Sync Fehler', err));
+    db.collection('appdata').doc('exercises').onSnapshot(doc=>{
+      if(doc.exists){
+        try{ St.exercises = JSON.parse(doc.data().value); }catch(e){}
+        if(St.route==='cockpit') render();
+      }
+    }, err=>console.error('Übungen-Live-Sync Fehler', err));
+  }else{
+    // Fallback ohne Firebase (Claude-Vorschau oder localStorage-Betrieb ohne echtes
+    // Backend): regelmäßiges, dezentes Nachschauen, während das Cockpit geöffnet ist.
+    setInterval(async ()=>{
+      if(St.route!=='cockpit') return;
+      const [sicht, ex] = await Promise.all([loadKey('sichtungen_index', {}), loadKey('exercises', [])]);
+      const sJson = JSON.stringify(sicht), eJson = JSON.stringify(ex);
+      let changed = false;
+      if(sJson!==LAST_SICHT_JSON){ St.sichtungen = sicht; LAST_SICHT_JSON = sJson; changed = true; }
+      if(eJson!==LAST_EX_JSON){ St.exercises = ex; LAST_EX_JSON = eJson; changed = true; }
+      if(changed) render();
+    }, 3000);
+  }
 }
 
 // Prüft, ob ein QR-Deep-Link (feste Patienten-ID) ansteht, und öffnet ggf. direkt die
@@ -1315,11 +1356,12 @@ async function doRegister(username, password, email){
 }
 
 /* ====================== EXERCISES ====================== */
-async function createExercise(name, scenario, ort, datum, uhrzeit, wetter){
+async function createExercise(name, scenario, ort, datum, uhrzeit, wetter, modus){
   if(!name){ toast('Name erforderlich'); return; }
   const ex = {id:uid(), name, scenario, status:'entwurf', createdBy:St.user.username,
     roles:[...PRESET_ROLES], participants:{}, createdAt:nowStamp(), log:[],
-    ort:ort||'', datum:datum||'', uhrzeit:uhrzeit||'', wetter:wetter||'', krankenhaeuser:[]};
+    ort:ort||'', datum:datum||'', uhrzeit:uhrzeit||'', wetter:wetter||'', krankenhaeuser:[],
+    modus: (modus==='liste') ? 'liste' : 'qr'};
   St.exercises.push(ex);
   await saveKey('exercises', St.exercises);
   toast('Übung erstellt');
@@ -1335,6 +1377,8 @@ async function saveExerciseDetails(exId){
   ex.datum = getVal('exe__datum');
   ex.uhrzeit = getVal('exe__uhrzeit');
   ex.wetter = getVal('exe__wetter');
+  const modusEl = document.querySelector('input[name="exe__modus"]:checked');
+  if(modusEl) ex.modus = modusEl.value;
   await saveKey('exercises', St.exercises);
   toast('Übung gespeichert');
   render();
@@ -1869,7 +1913,7 @@ function viewExercises(){
     return `<div class="card">
       <div class="flex-between">
         <div>
-          <h3>${ex.name} <span class="tag tag-status">${ex.status}</span></h3>
+          <h3>${ex.name} <span class="tag tag-status">${ex.status}</span> <span class="tag tag-status">${ex.modus==='liste'?'📋 mit Übersicht':'📷 QR-Scan'}</span></h3>
           <p>${ex.scenario||''}</p>
           ${meta?`<p class="small">${meta}</p>`:''}
           <p class="small">Leitung: ${ex.createdBy} ${myRole?`· deine Rolle: <b style="color:var(--blue)">${myRole}</b>`:''}</p>
@@ -1910,6 +1954,23 @@ function openCreateExerciseModal(){
         <div class="field"><label>Uhrzeit</label><input id="ex-uhrzeit" type="time"></div>
         <div class="field"><label>Wetter</label><input id="ex-wetter" placeholder="z.B. 12°C, bewölkt"></div>
       </div>
+      <div class="field">
+        <label>Sichtungs-Modus</label>
+        <div class="value-box" style="cursor:pointer;" onclick="document.getElementById('ex-modus-qr').checked=true;">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;color:var(--ink);text-transform:none;">
+            <input type="radio" name="ex-modus" id="ex-modus-qr" value="qr" checked style="width:auto;margin-top:3px;">
+            <span><b>Variante 1 – QR-Code zum Scannen:</b> Teilnehmer scannen jeden Patienten einzeln vor Ort.
+              Auf der Sichtungsseite gibt es KEINEN Zurück-Button zur Patientenübersicht.</span>
+          </label>
+        </div>
+        <div class="value-box" style="cursor:pointer;" onclick="document.getElementById('ex-modus-liste').checked=true;">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;color:var(--ink);text-transform:none;">
+            <input type="radio" name="ex-modus" id="ex-modus-liste" value="liste" style="width:auto;margin-top:3px;">
+            <span><b>Variante 2 – Mit Patientenübersicht (ohne QR-Codes):</b> Teilnehmer wählen Patienten aus einer
+              Liste. Auf der Sichtungsseite gibt es einen Zurück-Button zur Patientenübersicht.</span>
+          </label>
+        </div>
+      </div>
       <p class="small">Krankenhäuser können nach dem Erstellen über "Bearbeiten" hinzugefügt werden.</p>
       <button class="btn btn-primary" style="width:100%" onclick="createExercise(
         document.getElementById('ex-name').value,
@@ -1917,7 +1978,8 @@ function openCreateExerciseModal(){
         document.getElementById('ex-ort').value,
         document.getElementById('ex-datum').value,
         document.getElementById('ex-uhrzeit').value,
-        document.getElementById('ex-wetter').value);closeModal();">Erstellen</button>
+        document.getElementById('ex-wetter').value,
+        document.querySelector('input[name=\"ex-modus\"]:checked').value);closeModal();">Erstellen</button>
     </div>
   </div>`;
   render();
@@ -1943,6 +2005,21 @@ function openExerciseEditModal(exId){
       <div class="row">
         <div class="field"><label>Uhrzeit</label><input id="exe__uhrzeit" type="time" value="${ex.uhrzeit||''}"></div>
         <div class="field"><label>Wetter</label><input id="exe__wetter" value="${ex.wetter||''}"></div>
+      </div>
+      <div class="field">
+        <label>Sichtungs-Modus</label>
+        <div class="value-box" style="cursor:pointer;" onclick="document.getElementById('exe-modus-qr').checked=true;">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;color:var(--ink);text-transform:none;">
+            <input type="radio" name="exe__modus" id="exe-modus-qr" value="qr" ${(ex.modus||'qr')==='qr'?'checked':''} style="width:auto;margin-top:3px;">
+            <span><b>Variante 1 – QR-Code zum Scannen:</b> kein Zurück-Button auf der Sichtungsseite.</span>
+          </label>
+        </div>
+        <div class="value-box" style="cursor:pointer;" onclick="document.getElementById('exe-modus-liste').checked=true;">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;color:var(--ink);text-transform:none;">
+            <input type="radio" name="exe__modus" id="exe-modus-liste" value="liste" ${ex.modus==='liste'?'checked':''} style="width:auto;margin-top:3px;">
+            <span><b>Variante 2 – Mit Patientenübersicht:</b> Zurück-Button zur Patientenübersicht vorhanden.</span>
+          </label>
+        </div>
       </div>
       <button class="btn btn-primary" style="width:100%" onclick="saveExerciseDetails('${exId}')">Änderungen speichern</button>
 
@@ -2088,10 +2165,11 @@ function viewSichtung(){
     ? hospList.map(h=>`<div class="chip" style="cursor:pointer;${myHosp===h.id?'border-color:var(--navy);background:var(--yellow-dim);font-weight:700;':''}" onclick="assignHospital('${h.id}')">🏥 ${h.name} · ${h.km} km ${myHosp===h.id?'✓':''}</div>`).join('')
     : '<p class="small">Für diese Übung sind keine Krankenhäuser hinterlegt.</p>';
   const assignedHospName = myHosp ? (hospList.find(h=>h.id===myHosp)||{}).name : null;
+  const showBackButton = !ex || ex.modus === 'liste'; // Variante 2 (Patientenübersicht) hat den Button, Variante 1 (QR) nicht
 
   return `
   <div class="wrap">
-    <button class="btn" onclick="stopTimer();clearPatientUrlParam();go('patients')">← Zurück zur Patientenübersicht</button>
+    ${showBackButton ? `<button class="btn" onclick="stopTimer();clearPatientUrlParam();go('patients')">← Zurück zur Patientenübersicht</button>` : ''}
     <div class="card" style="margin-top:14px;">
       <div class="flex-between">
         <div>
@@ -2415,7 +2493,7 @@ function adminExercises(){
     return `<div class="card">
       <div class="flex-between">
         <div>
-          <h3>${ex.name} <span class="tag tag-status">${ex.status}</span></h3>
+          <h3>${ex.name} <span class="tag tag-status">${ex.status}</span> <span class="tag tag-status">${ex.modus==='liste'?'📋 mit Übersicht':'📷 QR-Scan'}</span></h3>
           <p>${ex.scenario||''}</p>
           ${meta?`<p class="small">${meta}</p>`:''}
           <p class="small">Leitung: ${ex.createdBy} · ${count} Sichtungen erfasst · ${(ex.krankenhaeuser||[]).length} Krankenhäuser hinterlegt</p>
