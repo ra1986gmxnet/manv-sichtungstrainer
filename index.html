@@ -1427,6 +1427,8 @@ async function joinExercise(exId, role){
     const pid = St.deepLinkPatientAfterJoin;
     St.deepLinkPatientAfterJoin = null;
     openPatient(pid);
+  }else if((ex.modus||'qr')==='qr'){
+    go('depesche');
   }else{
     go('patients');
   }
@@ -2067,13 +2069,41 @@ function viewPatients(){
   <div class="wrap">
     <h1>Patientenübersicht</h1>
     <p>Rolle: <span class="badge-role">${St.currentRole}</span></p>
-    <div class="card" style="background:var(--yellow-dim);border-color:var(--yellow);">
-      <h3 style="margin-top:0;">📷 QR-Code scannen</h3>
-      <p style="color:var(--ink);">Scanne den QR-Code neben dem Patienten auf dem Übungsgelände mit der
-      Kamera-App deines Smartphones — du gelangst dann direkt zur Sichtungsseite dieses Patienten.
-      Alternativ kannst du eine Patienten-ID auch manuell unten auswählen.</p>
-    </div>
     <div class="grid" style="margin-top:16px;">${tiles || '<div class="empty">Keine Patienten in der Datenbank</div>'}</div>
+  </div>`;
+}
+
+// Landing-Seite für Teilnehmer im QR-Scan-Modus (Variante 1): statt einer Patientenübersicht
+// bekommen sie eine aufbereitete "Einsatzdepesche" mit allen für sie relevanten Infos zur
+// Übung angezeigt. Die eigentlichen Patienten erreichen sie ausschließlich über die QR-Codes
+// vor Ort — diese Seite listet daher bewusst keine Patienten-IDs auf.
+function viewBriefing(){
+  const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
+  if(!ex) return `<div class="wrap"><div class="empty">Keine Übung ausgewählt.</div>
+    <button class="btn" onclick="go('exercises')">Zu den Übungen</button></div>`;
+  const hospList = (ex.krankenhaeuser||[]).map(h=>`<span class="chip">🏥 ${h.name} · ${h.km} km</span>`).join('')
+    || '<p class="small">Keine Krankenhäuser hinterlegt.</p>';
+  return `
+  <div class="wrap">
+    <div class="card" style="border-left:5px solid var(--red);">
+      <div class="small" style="letter-spacing:.12em;text-transform:uppercase;color:var(--red);font-weight:800;">⚠ Einsatzdepesche</div>
+      <h1 style="margin-top:4px;">${ex.name}</h1>
+      <div class="divider"></div>
+      <div class="value-box"><div class="lbl">Meldebild / Lage</div><div class="val">${ex.scenario||'—'}</div></div>
+      <div class="row">
+        <div class="value-box"><div class="lbl">Einsatzort</div><div class="val">${ex.ort||'—'}</div></div>
+        <div class="value-box"><div class="lbl">Datum</div><div class="val">${ex.datum||'—'}</div></div>
+      </div>
+      <div class="row">
+        <div class="value-box"><div class="lbl">Alarmzeit</div><div class="val">${ex.uhrzeit||'—'}</div></div>
+        <div class="value-box"><div class="lbl">Wetterlage</div><div class="val">${ex.wetter||'—'}</div></div>
+      </div>
+      <div class="value-box"><div class="lbl">Deine Funktion / Rolle</div><div class="val"><span class="badge-role">${St.currentRole}</span></div></div>
+      <div class="section-title">Nächstgelegene Krankenhäuser</div>
+      <div class="row" style="flex-wrap:wrap;gap:6px;">${hospList}</div>
+      <div class="divider"></div>
+      <p class="small">📷 Begib dich ins Einsatzgebiet und scanne die QR-Codes an den Patienten vor Ort, um mit der Sichtung zu beginnen.</p>
+    </div>
   </div>`;
 }
 
@@ -2138,7 +2168,11 @@ function fieldBlock(label, key, seconds, content){
 
 function viewSichtung(){
   const p = St.patients.find(x=>x.id===St.currentPatientId);
-  if(!p) return `<div class="wrap"><p>Patient nicht gefunden.</p><button class="btn" onclick="go('patients')">Zurück</button></div>`;
+  if(!p){
+    const exFallback = St.exercises.find(e=>e.id===St.currentExerciseId);
+    const fallbackRoute = (exFallback && exFallback.modus==='liste') ? 'patients' : 'depesche';
+    return `<div class="wrap"><p>Patient nicht gefunden.</p><button class="btn" onclick="go('${fallbackRoute}')">Zurück</button></div>`;
+  }
   const myCat = myTriageFor(p.id);
 
   const xabcdeLabels = {X:'X – Kritische Blutung', A:'A – Atemweg', B:'B – Atmung', C:'C – Kreislauf', D:'D – Bewusstsein/Defizit', E:'E – Exposition/Umgebung'};
@@ -2522,8 +2556,15 @@ function render(){
     // ausschließlich für die Rolle "admin" zugänglich, auch wenn St.route manuell
     // (z.B. über die Browser-Konsole) auf 'admin' gesetzt würde.
     if(St.route==='admin' && St.user.role!=='admin'){ St.route='exercises'; }
+    // Im QR-Scan-Modus (Variante 1) ist die Patientenübersicht grundsätzlich nicht erreichbar —
+    // Teilnehmer gelangen ausschließlich über das Scannen der QR-Codes zu einem Patienten.
+    if(St.route==='patients'){
+      const curEx = St.exercises.find(e=>e.id===St.currentExerciseId);
+      if(curEx && (curEx.modus||'qr')==='qr'){ St.route='depesche'; }
+    }
     body = topbar();
     if(St.route==='exercises') body += viewExercises();
+    else if(St.route==='depesche') body += viewBriefing();
     else if(St.route==='patients') body += viewPatients();
     else if(St.route==='sichtung') body += viewSichtung();
     else if(St.route==='cockpit') body += viewCockpit();
