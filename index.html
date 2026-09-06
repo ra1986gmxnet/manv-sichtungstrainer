@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -275,6 +274,38 @@ const PRESET_ROLES = ['1. RTW','2. RTW','3. RTW','4. RTW','5. RTW','1. NEF','2. 
   'LNA','OrgL','GW San','AB ManV','BHP 50','BTP 500'];
 
 function uid(){ return Math.random().toString(36).slice(2,9); }
+
+/* ====================== PASSWORT-SICHERHEIT ======================
+   Passwörter werden NICHT im Klartext gespeichert, sondern nur als gesalzener SHA-256-Hash
+   (über die im Browser eingebaute Web-Crypto-API, ohne externe Bibliothek). Selbst wer direkten
+   Lesezugriff auf die Datenbank bekommt, sieht damit keine echten Passwörter — nur unbrauchbare
+   Hash-Werte. Bereits bestehende Konten mit altem Klartext-Passwort werden beim nächsten
+   erfolgreichen Login automatisch und unbemerkt auf das neue, sichere Format umgestellt. */
+async function sha256Hex(text){
+  const enc = new TextEncoder().encode(text);
+  const hashBuf = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(hashBuf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function randomSalt(){
+  const arr = new Uint8Array(16);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function setPasswordHash(userObj, plainPassword){
+  const salt = randomSalt();
+  userObj.salt = salt;
+  userObj.passwordHash = await sha256Hex(salt+':'+plainPassword);
+  delete userObj.password; // altes Klartextfeld entfernen, falls vorhanden
+}
+async function verifyPassword(userObj, plainPassword){
+  if(userObj.passwordHash && userObj.salt){
+    return (await sha256Hex(userObj.salt+':'+plainPassword)) === userObj.passwordHash;
+  }
+  if(userObj.password !== undefined){
+    return userObj.password === plainPassword; // Alt-Konto ohne Hash (wird bei Erfolg migriert)
+  }
+  return false;
+}
 function nowStamp(){ return new Date().toLocaleString('de-DE'); }
 
 function toast(msg){
@@ -345,10 +376,10 @@ async function init(){
 
   St.users = await loadKey('users', null);
   if(!St.users){
-    St.users = {
-      'Martin': {username:'Martin', password:'1234', email:'admin@example.org', role:'admin',
-        locked:false, createdAt:nowStamp(), lastLogin:null}
-    };
+    const adminUser = {username:'Martin', email:'admin@example.org', role:'admin',
+      locked:false, createdAt:nowStamp(), lastLogin:null};
+    await setPasswordHash(adminUser, '1234');
+    St.users = { 'Martin': adminUser };
     await saveKey('users', St.users);
   }
   St.patients = await loadKey('patients', null);
@@ -1343,7 +1374,8 @@ async function doLogin(username, password){
   const u = St.users[username];
   if(!u){ toast('Benutzer nicht gefunden'); return; }
   if(u.locked){ toast('Konto gesperrt – bitte Admin kontaktieren'); return; }
-  if(u.password !== password){ toast('Passwort falsch'); return; }
+  if(!(await verifyPassword(u, password))){ toast('Passwort falsch'); return; }
+  if(!u.passwordHash){ await setPasswordHash(u, password); } // Alt-Konto: unbemerkt auf Hash umstellen
   u.lastLogin = nowStamp();
   await saveKey('users', St.users);
   St.user = u;
@@ -1355,8 +1387,9 @@ async function doLogin(username, password){
 async function doRegister(username, password, email){
   if(!username || !password || !email){ toast('Bitte alle Felder ausfüllen'); return; }
   if(St.users[username]){ toast('Benutzername bereits vergeben'); return; }
-  St.users[username] = {username, password, email, role:'teilnehmer', locked:false,
-    createdAt:nowStamp(), lastLogin:null};
+  const newUser = {username, email, role:'teilnehmer', locked:false, createdAt:nowStamp(), lastLogin:null};
+  await setPasswordHash(newUser, password);
+  St.users[username] = newUser;
   await saveKey('users', St.users);
   toast('Registrierung erfolgreich – du kannst dich jetzt anmelden');
   go('login');
@@ -1956,7 +1989,7 @@ function openSetPasswordModal(username){
 async function setUserPassword(username, newPassword){
   if(!newPassword || newPassword.length<3){ toast('Bitte ein Passwort mit mindestens 3 Zeichen eingeben'); return; }
   const u = St.users[username]; if(!u) return;
-  u.password = newPassword;
+  await setPasswordHash(u, newPassword);
   await saveKey('users', St.users);
   toast('Passwort für '+username+' aktualisiert');
   closeModal();
@@ -1998,8 +2031,10 @@ async function createUserByAdmin(username, password, email, role){
   username = (username||'').trim();
   if(!username || !password || password.length<3){ toast('Benutzername und ein Passwort mit mind. 3 Zeichen erforderlich'); return; }
   if(St.users[username]){ toast('Benutzername bereits vergeben'); return; }
-  St.users[username] = {username, password, email:email||'', role: role||'teilnehmer', locked:false,
+  const newUser = {username, email:email||'', role: role||'teilnehmer', locked:false,
     createdAt:nowStamp(), lastLogin:null};
+  await setPasswordHash(newUser, password);
+  St.users[username] = newUser;
   const ok = await saveKeyRetry('users', St.users);
   if(!ok){ delete St.users[username]; toast('Fehler: Nutzer konnte nicht gespeichert werden'); render(); return; }
   toast('Nutzer '+username+' angelegt');

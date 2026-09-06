@@ -131,19 +131,93 @@ dieser Schritt ist nur nötig, wenn du eine eigene Domain wie
 
 ## Wichtige Sicherheitshinweise für den Praxisbetrieb
 
-- **Passwörter werden aktuell im Klartext in der Datenbank gespeichert**
-  (kein Hashing) und die App nutzt ein einfaches eigenes Login statt
-  "Firebase Authentication". Für eine interne Übung mit vertrauenswürdigen
-  Teilnehmern ist das ein akzeptabler Kompromiss, für einen Einsatz mit
-  sensiblen Daten oder öffentlichem Zugriff nicht ausreichend.
-- Die mitgelieferten Firestore-Regeln erlauben aus diesem Grund jedem mit der
-  (im Quelltext sichtbaren) Firebase-Konfiguration Lese-/Schreibzugriff auf
-  die Datenbank. Das lässt sich nur durch eine echte Migration auf "Firebase
-  Authentication" sauber schließen.
+**Zum Quelltext:** Bei JEDER Webseite (nicht nur dieser) kann jeder Besucher über
+"Seitenquelltext anzeigen" bzw. die Entwicklertools des Browsers den kompletten
+HTML/JavaScript-Code einsehen — das ist eine technische Grundeigenschaft des Web
+und lässt sich bei einer Anwendung, die im Browser läuft, durch nichts (auch keine
+Verschleierung/Minifizierung) wirklich verhindern. Wichtig zu wissen: Die
+Firebase-Konfiguration (`apiKey`, `projectId` etc.) ist dabei **kein Geheimnis** —
+Firebase ist bewusst so konzipiert, dass diese Werte öffentlich sichtbar sein
+dürfen. Die eigentliche Absicherung erfolgt über die Firestore-Sicherheitsregeln
+(`firestore.rules`) und — für die Nutzerdaten — über die Server-Funktion
+`netlify/functions/auth.js`, nicht durch Geheimhaltung der Konfiguration.
+
+- **Passwörter werden serverseitig gehasht** (Node "crypto", scrypt + individuelles
+  Salt) und nie im Klartext gespeichert. Der Browser bekommt nach dem Login nur ein
+  signiertes, 12 Stunden gültiges Sitzungs-Token zurück — nie ein Passwort oder
+  einen Passwort-Hash.
+- Solange die Server-Funktion noch NICHT eingerichtet ist (siehe unten), fällt die
+  App automatisch auf eine einfachere, clientseitige Absicherung zurück (gesalzener
+  SHA-256-Hash), damit Login/Registrierung trotzdem sofort funktionieren. Das ist
+  bereits deutlich sicherer als Klartext, aber noch nicht die volle Absicherung.
 - Ändere das Admin-Passwort (Martin/1234) direkt nach dem ersten Login.
 - Behalte deinen Anthropic-API-Key geheim und lade ihn niemals in ein
   öffentliches GitHub-Repository hoch (er gehört ausschließlich in die
   Netlify-Umgebungsvariable, nicht in den Code).
+
+---
+
+## Optional (empfohlen): Maximale Sicherheit für Benutzerdaten aktivieren
+
+Mit diesem zusätzlichen Schritt ist das Dokument mit den Nutzerdaten (Benutzernamen,
+E-Mails, Passwort-Hashes) für JEDEN direkten Zugriff aus dem Browser komplett
+gesperrt — auch mit der öffentlich sichtbaren Firebase-Konfiguration kommt dann
+niemand mehr direkt an diese Daten heran. Nur noch die Server-Funktion (mit einem
+privaten Service-Account-Schlüssel, der Firestore-Regeln grundsätzlich umgeht) darf
+sie lesen/schreiben. Login, Registrierung und alle Admin-Nutzeraktionen laufen dann
+ausschließlich über diese Funktion.
+
+**Schritt 1: Service-Account-Schlüssel erzeugen**
+1. In der Firebase-Konsole dein Projekt öffnen → Zahnrad oben links →
+   "Projekteinstellungen" → Tab "Dienstkonten" ("Service accounts").
+2. "Neuen privaten Schlüssel generieren" klicken → eine JSON-Datei wird
+   heruntergeladen. **Diese Datei ist hochsensibel — niemals ins Git-Repository
+   einchecken, niemals weitergeben.**
+
+**Schritt 2: Umgebungsvariablen in Netlify setzen**
+1. Netlify-Dashboard → dein Projekt → "Site configuration" → "Environment variables".
+2. Neue Variable `FIREBASE_SERVICE_ACCOUNT_JSON` anlegen. Als Wert den **kompletten
+   Inhalt** der heruntergeladenen JSON-Datei einfügen (die ganze Datei, so wie sie
+   ist, als eine einzige Zeile/einen Wert).
+3. Neue Variable `SESSION_SECRET` anlegen. Als Wert eine lange, zufällige
+   Zeichenkette eintragen (z.B. mit einem Passwort-Generator 40+ Zeichen erzeugen).
+   Dieser Wert signiert die Sitzungs-Tokens — er darf niemandem bekannt sein.
+4. "Save" klicken.
+
+**Schritt 3: Neu deployen und testen**
+1. Einen neuen Deploy anstoßen (z.B. "Trigger deploy" → "Deploy site" in Netlify,
+   oder einen leeren Commit ins Repo pushen), damit die Funktion die neuen
+   Umgebungsvariablen lädt.
+2. Warten, bis der Deploy fertig ist, dann die Live-Seite öffnen und einmal ganz
+   normal einloggen (z.B. als Martin). Wenn das funktioniert, läuft der Login jetzt
+   bereits über die sichere Server-Funktion (die alten, einfacheren Firestore-Regeln
+   erlauben das parallel weiterhin, das ist gewollt für diesen Zwischenschritt).
+3. Falls eine Fehlermeldung wie "Server nicht konfiguriert" erscheint: die
+   Umgebungsvariablen wurden noch nicht übernommen — Schritt 2 prüfen und erneut
+   deployen.
+
+**Schritt 4: Firestore-Regeln verschärfen (erst NACHDEM Schritt 3 erfolgreich war!)**
+1. In der Firebase-Konsole → Firestore Database → Tab "Regeln".
+2. Den kompletten Inhalt der Datei `firestore.rules.hardened` (aus diesem
+   Deployment-Paket) einfügen — er ersetzt den bisherigen Inhalt.
+3. "Veröffentlichen" klicken.
+4. Die Live-Seite erneut testen: Login, Registrierung, und im Admin-Bereich einen
+   Nutzer anlegen/bearbeiten/sperren/löschen sowie ein neues Passwort setzen —
+   alles sollte weiterhin normal funktionieren, läuft jetzt aber ausschließlich über
+   die abgesicherte Server-Funktion.
+
+**Wichtig:** Führe Schritt 4 wirklich erst NACH einem erfolgreich getesteten Login
+über die Server-Funktion aus. Sind die gehärteten Regeln aktiv, ohne dass die
+Funktion richtig eingerichtet ist, kann sich niemand mehr an- oder abmelden, da dann
+weder der Browser direkt noch die Funktion an die Nutzerdaten herankommt. Im
+Zweifel einfach in der Firebase-Konsole wieder den Inhalt der ursprünglichen
+`firestore.rules` einsetzen, bis alles läuft, und danach erneut versuchen.
+
+Nach erfolgreicher Einrichtung gilt: **Kein Dritter kann mehr — egal mit welchem
+Wissen über die öffentliche Firebase-Konfiguration — Benutzernamen, E-Mails oder
+Passwort-Hashes direkt aus der Datenbank auslesen.** Der einzige Weg an die Daten
+führt über die Server-Funktion, die jede Anfrage prüft (gültiges Admin-Token für
+Admin-Aktionen, korrektes Passwort für den Login).
 
 ---
 
