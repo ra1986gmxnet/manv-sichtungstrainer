@@ -1969,6 +1969,113 @@ async function assignRole(username, role){
   render();
 }
 
+function openCreateUserModal(){
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Neuen Nutzer anlegen</h2>
+      <div class="field"><label>Benutzername</label><input id="cu-user"></div>
+      <div class="field"><label>Passwort</label><input id="cu-pass" type="text" placeholder="Mindestens 3 Zeichen"></div>
+      <div class="field"><label>E-Mail</label><input id="cu-mail" type="email"></div>
+      <div class="field"><label>Rolle</label>
+        <select id="cu-role">
+          <option value="teilnehmer">teilnehmer</option>
+          <option value="uebungsleiter">uebungsleiter</option>
+          <option value="admin">admin</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" style="width:100%" onclick="createUserByAdmin(
+        document.getElementById('cu-user').value,
+        document.getElementById('cu-pass').value,
+        document.getElementById('cu-mail').value,
+        document.getElementById('cu-role').value)">Nutzer anlegen</button>
+    </div>
+  </div>`;
+  render();
+}
+async function createUserByAdmin(username, password, email, role){
+  username = (username||'').trim();
+  if(!username || !password || password.length<3){ toast('Benutzername und ein Passwort mit mind. 3 Zeichen erforderlich'); return; }
+  if(St.users[username]){ toast('Benutzername bereits vergeben'); return; }
+  St.users[username] = {username, password, email:email||'', role: role||'teilnehmer', locked:false,
+    createdAt:nowStamp(), lastLogin:null};
+  const ok = await saveKeyRetry('users', St.users);
+  if(!ok){ delete St.users[username]; toast('Fehler: Nutzer konnte nicht gespeichert werden'); render(); return; }
+  toast('Nutzer '+username+' angelegt');
+  closeModal();
+}
+
+function openEditUserModal(username){
+  const u = St.users[username]; if(!u) return;
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Nutzer bearbeiten</h2>
+      <div class="field"><label>Benutzername</label><input id="eu-user" value="${u.username}" ${u.username==='Martin'?'disabled':''}></div>
+      ${u.username==='Martin'?'<p class="small">Der Benutzername des Haupt-Admins Martin kann nicht geändert werden.</p>':''}
+      <div class="field"><label>E-Mail</label><input id="eu-mail" type="email" value="${u.email||''}"></div>
+      <div class="field"><label>Rolle</label>
+        <select id="eu-role" ${u.username==='Martin'?'disabled':''}>
+          ${['teilnehmer','uebungsleiter','admin'].map(r=>`<option value="${r}" ${u.role===r?'selected':''}>${r}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Status</label>
+        <select id="eu-locked">
+          <option value="0" ${!u.locked?'selected':''}>aktiv</option>
+          <option value="1" ${u.locked?'selected':''}>gesperrt</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" style="width:100%" onclick="saveEditedUser('${u.username}')">Änderungen speichern</button>
+    </div>
+  </div>`;
+  render();
+}
+async function saveEditedUser(oldUsername){
+  const u = St.users[oldUsername]; if(!u) return;
+  const getVal = (id)=>{ const el = document.getElementById(id); return el ? el.value : ''; };
+  const newUsername = (getVal('eu-user')||oldUsername).trim();
+  const newEmail = getVal('eu-mail');
+  const newRole = oldUsername==='Martin' ? 'admin' : getVal('eu-role');
+  const newLocked = getVal('eu-locked')==='1';
+
+  if(!newUsername){ toast('Benutzername darf nicht leer sein'); return; }
+
+  if(newUsername !== oldUsername){
+    if(oldUsername==='Martin'){ toast('Der Benutzername von Martin kann nicht geändert werden'); return; }
+    if(St.users[newUsername]){ toast('Dieser Benutzername ist bereits vergeben'); return; }
+    // Benutzernamen überall konsistent umbenennen, damit keine verwaisten Referenzen entstehen:
+    // Übungsteilnahmen, Übungs-Ersteller sowie alle bereits erfassten Sichtungsergebnisse.
+    delete St.users[oldUsername];
+    u.username = newUsername;
+    St.users[newUsername] = u;
+    St.exercises.forEach(ex=>{
+      if(ex.participants && ex.participants[oldUsername]!==undefined){
+        ex.participants[newUsername] = ex.participants[oldUsername];
+        delete ex.participants[oldUsername];
+      }
+      if(ex.createdBy===oldUsername) ex.createdBy = newUsername;
+    });
+    Object.keys(St.sichtungen).forEach(exId=>{
+      (St.sichtungen[exId]||[]).forEach(rec=>{
+        if(rec.username===oldUsername) rec.username = newUsername;
+      });
+    });
+    if(St.user && St.user.username===oldUsername){ St.user = St.users[newUsername]; saveLoginSession(newUsername); }
+    await saveKey('exercises', St.exercises);
+    await saveKey('sichtungen_index', St.sichtungen);
+  }
+
+  u.email = newEmail;
+  u.role = newRole;
+  u.locked = newLocked;
+  const ok = await saveKeyRetry('users', St.users);
+  if(!ok){ toast('Fehler: Änderungen konnten nicht gespeichert werden'); render(); return; }
+  toast('Nutzer gespeichert');
+  closeModal();
+}
+
 /* ====================== PDF / PRINT EXPORT ====================== */
 function exportExercisePdf(exId){
   const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
@@ -2532,7 +2639,10 @@ function buildDebriefingTimeline(exId){
   const ex = St.exercises.find(e=>e.id===exId);
   const entries = [];
   (ex && ex.log || []).forEach(l=>{
-    entries.push({ time:l.time, timeMs:l.timeMs||0, text:`⚙ ${l.event}`, kind:'log' });
+    let icon = '📢'; // manueller Schnelleintrag/freie Eingabe (Standard)
+    if(l.event.startsWith('status:')) icon = '⚙';
+    else if(l.event.includes('Übung gestartet')) icon = '▶';
+    entries.push({ time:l.time, timeMs:l.timeMs||0, text:`${icon} ${l.event}`, kind:'log' });
   });
   (St.sichtungen[exId]||[]).forEach(r=>{
     if(!r.kategorie) return;
@@ -2606,7 +2716,7 @@ function exportDebriefingPdf(exId){
   const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
   const stats = computeDebriefingStats(exId);
   const timeline = buildDebriefingTimeline(exId);
-  const timelineRows = timeline.map(t=>`<tr><td>${t.time}</td><td>${t.text.replace(/[⚙🩺✓✕]/g,'').trim()}</td></tr>`).join('')
+  const timelineRows = timeline.map(t=>`<tr><td>${t.time}</td><td>${t.text.replace(/[⚙🩺✓✕📢▶]/g,'').trim()}</td></tr>`).join('')
     || '<tr><td colspan="2">Keine Ereignisse erfasst</td></tr>';
   const briefingFields = [
     ['Einsatzstichwort', ex.einsatzstichwort], ['Alarmierte Kräfte', ex.alarmierteKraefte],
@@ -2661,6 +2771,45 @@ function emailDebriefing(exId){
   window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
 
+// ====================== COCKPIT-SCHNELLEINTRÄGE FÜRS DEBRIEFING ======================
+// Vorgegebene Buttons im Cockpit, mit denen der Übungsleiter/Admin während der laufenden
+// Übung wichtige Ereignisse mit Zeitstempel festhält. Diese landen automatisch (über
+// buildDebriefingTimeline) chronologisch zwischen den Sichtungsergebnissen im Debriefing.
+const COCKPIT_QUICK_EVENTS = [
+  'Durchsage: Alle Gehfähigen bitte mitkommen',
+  'Sichtungsschema nicht angewendet',
+  'Rückmeldung gegeben',
+  'Einsatzstichwort erhöht',
+  'Patient übersehen',
+  'Raum übersehen',
+  'Nicht richtig abgesucht'
+];
+
+async function logCockpitEvent(exId, eventText){
+  if(!eventText || !eventText.trim()) return;
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  ex.log = ex.log || [];
+  ex.log.push({event:eventText.trim(), time:nowStamp(), timeMs:Date.now()});
+  const ok = await saveKeyRetry('exercises', St.exercises);
+  if(!ok){ toast('Fehler: Eintrag konnte nicht gespeichert werden'); return; }
+  toast('Eintrag erfasst: '+eventText.trim());
+  render();
+}
+
+function openFreeEventModal(exId){
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Freie Eingabe</h2>
+      <p class="small">Dieser Text wird mit aktuellem Zeitstempel im Debriefing-Verlauf eingetragen.</p>
+      <div class="field"><label>Eintrag</label><textarea id="fe-text" rows="3" placeholder="z.B. Zusätzliche Kräfte nachgefordert"></textarea></div>
+      <button class="btn btn-primary" style="width:100%" onclick="logCockpitEvent('${exId}', document.getElementById('fe-text').value);closeModal();">Eintragen</button>
+    </div>
+  </div>`;
+  render();
+}
+
 function viewCockpit(){
   const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
   if(!ex) return `<div class="wrap"><p>Keine Übung ausgewählt.</p></div>`;
@@ -2694,6 +2843,14 @@ function viewCockpit(){
     <div class="card">
       <div class="section-title" style="margin-top:0;">Nächstgelegene Krankenhäuser</div>
       ${hospChips}
+    </div>
+    <div class="card">
+      <div class="section-title" style="margin-top:0;">Schnelleinträge fürs Debriefing</div>
+      <p class="small">Erzeugt sofort einen Zeitstempel-Eintrag, der später im Debriefing chronologisch zwischen den Sichtungsergebnissen erscheint.</p>
+      <div class="row" style="flex-wrap:wrap;gap:8px;">
+        ${COCKPIT_QUICK_EVENTS.map(txt=>`<button class="btn btn-sm" onclick="logCockpitEvent('${ex.id}', '${txt.replace(/'/g,"\\'")}')">${txt}</button>`).join('')}
+        <button class="btn btn-sm btn-primary" onclick="openFreeEventModal('${ex.id}')">✏️ Freie Eingabe</button>
+      </div>
     </div>
     <div class="row" style="margin:14px 0;">
       <button class="btn btn-primary" onclick="St.currentExerciseId='${ex.id}';go('briefing')">📋 Briefing</button>
@@ -2930,6 +3087,7 @@ function adminUsers(){
       </td>
       <td>${u.locked?'<span class="tag tag-rot">gesperrt</span>':'<span class="tag tag-gruen">aktiv</span>'}</td>
       <td>
+        <button class="btn btn-sm" onclick="openEditUserModal('${u.username}')">Ändern</button>
         <button class="btn btn-sm" onclick="toggleLock('${u.username}')">${u.locked?'Entsperren':'Sperren'}</button>
         <button class="btn btn-sm" onclick="openSetPasswordModal('${u.username}')">Passwort setzen</button>
         ${u.username!=='Martin'?`<button class="btn btn-sm btn-danger" onclick="deleteUser('${u.username}')">Löschen</button>`:''}
@@ -2937,8 +3095,11 @@ function adminUsers(){
     </tr>`).join('');
   return `
   <div class="card">
-    <div class="field"><label>Suche</label><input id="user-search" oninput="filterUsers()" placeholder="Benutzername oder E-Mail"></div>
-    <table id="user-table"><thead><tr><th>Benutzer</th><th>E-Mail</th><th>Letzte Anmeldung</th><th>Rolle</th><th>Status</th><th></th></tr></thead>
+    <div class="flex-between">
+      <div class="field" style="flex:1;margin-bottom:0;"><label>Suche</label><input id="user-search" oninput="filterUsers()" placeholder="Benutzername oder E-Mail"></div>
+      <button class="btn btn-primary" style="flex:0 0 auto;" onclick="openCreateUserModal()">+ Neuer Nutzer</button>
+    </div>
+    <table id="user-table" style="margin-top:14px;"><thead><tr><th>Benutzer</th><th>E-Mail</th><th>Letzte Anmeldung</th><th>Rolle</th><th>Status</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table>
   </div>`;
 }
