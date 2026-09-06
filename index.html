@@ -255,6 +255,7 @@ const St = {
   currentExerciseId:null,
   currentRole:null,
   currentPatientId:null,
+  patientOpenedAtMs:null,
   selectedBodyPart:null,
   reveal:{},           // fieldKey -> true, reset per patient view
   timer:{active:false,field:null,remaining:0,intervalId:null},
@@ -476,6 +477,12 @@ function pickUniqueName(origin, gender, usedNames){
 function mkBase(cat, f){
   return {
     kategorieReal: cat,
+    // "typ" klassifiziert den Patienten grob nach Ereignisart, damit bei der Übungserstellung
+    // nur thematisch passende Patienten aus der Datenbank gezogen werden (z.B. keine
+    // Durchfallerkrankung bei einer Explosion). Alle mitgelieferten Standard-Templates sind
+    // Trauma-/Verletzungsfälle; per KI generierte Zusatzpatienten bekommen ihren Typ passend
+    // zum jeweils eingegebenen Szenario zugewiesen (siehe classifyScenario()).
+    typ: f.typ || 'trauma',
     ersteindruck: f.ersteindruck,
     // WICHTIG: Nur die Kategorie "grün" ist per mSTaRT-Definition gehfähig. Alle anderen
     // Kategorien sind standardmäßig NICHT gehfähig, außer ein Template gibt explizit eine
@@ -1355,15 +1362,77 @@ async function doRegister(username, password, email){
   go('login');
 }
 
+// ====================== SZENARIO-KLASSIFIZIERUNG & PATIENTENAUSWAHL ======================
+// Ordnet ein Szenario grob einer Ereignisart zu, damit bei der Übungserstellung nur
+// thematisch passende Patienten aus der Datenbank gezogen werden (z.B. keine
+// Durchfallerkrankung bei einer Explosion, keine Explosionsverletzungen bei einer
+// Lebensmittelvergiftung im Ferienlager).
+const TRAUMA_KEYWORDS = ['explosion','einsturz','unfall','verkehrsunfall','brand','feuer','absturz',
+  'schuss','amoklauf','anschlag','zugunglück','busunfall','flugzeugunglück','industrieunfall',
+  'gebäudeeinsturz','sturm','unwetter','massenkarambolage','crash','kollision','verschüttung','explosionsunglück'];
+const ERKRANKUNG_KEYWORDS = ['durchfall','erkrankung','infektion','lebensmittelvergiftung','virus',
+  'ausbruch','epidemie','vergiftung','norovirus','magen-darm','krankheitswelle','hitzschlag',
+  'hitzewelle','kollaps','übelkeit','seuche','kontamination'];
+
+function classifyScenario(text){
+  const t = (text||'').toLowerCase();
+  if(!t.trim()) return 'trauma'; // ohne Angabe: Standardannahme Trauma/MANV, da die 100 Basispatienten so angelegt sind
+  const traumaHits = TRAUMA_KEYWORDS.filter(k=>t.includes(k)).length;
+  const krankHits = ERKRANKUNG_KEYWORDS.filter(k=>t.includes(k)).length;
+  if(krankHits > traumaHits) return 'erkrankung';
+  return 'trauma';
+}
+
+// Wählt "count" Patienten aus der Gesamtdatenbank aus, die zum Szenario passen (per grober
+// Typ-Klassifizierung), und mischt sie zufällig. Reichen thematisch passende Patienten nicht
+// aus, wird mit den übrigen Patienten aufgefüllt (damit die gewünschte Anzahl immer erreicht
+// wird) und der Aufrufer per Rückgabewert "shortfall" informiert.
+function selectPatientsForExercise(scenarioText, count){
+  const typ = classifyScenario(scenarioText);
+  const matching = St.patients.filter(p=>(p.typ||'trauma')===typ);
+  const rest = St.patients.filter(p=>(p.typ||'trauma')!==typ);
+  function shuffle(arr){ const a=arr.slice(); for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+  const shuffledMatch = shuffle(matching);
+  let selected = shuffledMatch.slice(0, count);
+  let shortfall = 0;
+  if(selected.length < count){
+    shortfall = count - selected.length;
+    selected = selected.concat(shuffle(rest).slice(0, shortfall));
+  }
+  return { ids: selected.map(p=>p.id), typ, matchingAvailable: matching.length, shortfall };
+}
+
 /* ====================== EXERCISES ====================== */
-async function createExercise(name, scenario, ort, datum, uhrzeit, wetter, modus){
+async function createExercise(name, scenario, ort, datum, uhrzeit, wetter, modus, patientCount){
   if(!name){ toast('Name erforderlich'); return; }
+  const count = Math.max(1, parseInt(patientCount)||20);
+  const finalModus = (modus==='liste') ? 'liste' : 'qr';
   const ex = {id:uid(), name, scenario, status:'entwurf', createdBy:St.user.username,
     roles:[...PRESET_ROLES], participants:{}, createdAt:nowStamp(), log:[],
     ort:ort||'', datum:datum||'', uhrzeit:uhrzeit||'', wetter:wetter||'', krankenhaeuser:[],
-    modus: (modus==='liste') ? 'liste' : 'qr'};
+    modus: finalModus, patientCount: count, patientIds: []};
+
+  if(finalModus==='liste'){
+    // Variante 2: feste, zum Szenario passende Auswahl aus der Patientendatenbank ziehen.
+    // Diese Auswahl bestimmt, welche Patienten-IDs auf der Patientenübersicht erscheinen.
+    const sel = selectPatientsForExercise(scenario, count);
+    ex.patientIds = sel.ids;
+    if(sel.shortfall > 0){
+      toast(`Hinweis: nur ${sel.matchingAvailable} passende Patienten gefunden, ${sel.shortfall} thematisch unpassende wurden ergänzt`);
+    }
+  }
+  // Variante 1 (QR): patientCount ist nur ein Planungswert. Welche Patienten tatsächlich
+  // Teil der Übung werden, ergibt sich ausschließlich daraus, welche QR-Codes gescannt
+  // werden — ex.patientIds bleibt daher bewusst leer/ungenutzt.
+
   St.exercises.push(ex);
-  await saveKey('exercises', St.exercises);
+  const ok = await saveKeyRetry('exercises', St.exercises);
+  if(!ok){
+    St.exercises.pop(); // lokale Änderung zurücknehmen, damit die Oberfläche keine "Phantom-Übung" zeigt
+    toast('Fehler: Übung konnte NICHT gespeichert werden (Datenbank-/Verbindungsfehler). Bitte erneut versuchen.');
+    render();
+    return;
+  }
   toast('Übung erstellt');
   render();
 }
@@ -1379,9 +1448,31 @@ async function saveExerciseDetails(exId){
   ex.wetter = getVal('exe__wetter');
   const modusEl = document.querySelector('input[name="exe__modus"]:checked');
   if(modusEl) ex.modus = modusEl.value;
+  const pc = parseInt(getVal('exe__patientcount'));
+  if(pc && pc>0) ex.patientCount = pc;
   await saveKey('exercises', St.exercises);
   toast('Übung gespeichert');
   render();
+}
+
+// Wählt für eine bestehende Übung (Variante 2) die feste Patientenmenge neu — z.B. nachdem
+// das Szenario oder die Patientenanzahl geändert wurde. Ersetzt ex.patientIds komplett.
+async function regenerateExercisePatients(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const scenarioNow = document.getElementById('exe__scenario') ? document.getElementById('exe__scenario').value : ex.scenario;
+  const countNow = Math.max(1, parseInt(document.getElementById('exe__patientcount').value) || ex.patientCount || 20);
+  if(!confirm(`Wirklich ${countNow} neue Patienten für diese Übung auswählen? Die bisherige Zuordnung geht dabei verloren (bereits erfasste Sichtungen bleiben aber erhalten).`)) return;
+  const sel = selectPatientsForExercise(scenarioNow, countNow);
+  ex.patientIds = sel.ids;
+  ex.patientCount = countNow;
+  ex.scenario = scenarioNow;
+  await saveKey('exercises', St.exercises);
+  if(sel.shortfall > 0){
+    toast(`Neu ausgewählt — Hinweis: nur ${sel.matchingAvailable} passende Patienten gefunden, ${sel.shortfall} wurden ergänzt`);
+  }else{
+    toast('Patienten neu ausgewählt');
+  }
+  openExerciseEditModal(exId);
 }
 
 async function addHospital(exId, name, km){
@@ -1411,7 +1502,7 @@ async function setExerciseStatus(exId, status){
   const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
   ex.status = status;
   ex.log = ex.log || [];
-  ex.log.push({event:'status:'+status, time:nowStamp()});
+  ex.log.push({event:'status:'+status, time:nowStamp(), timeMs:Date.now()});
   await saveKey('exercises', St.exercises);
   render();
 }
@@ -1451,7 +1542,7 @@ async function startExerciseFromBriefing(exId){
   ex.einsatzgrenzen = getVal('bf__grenzen');
   ex.status = 'läuft';
   ex.log = ex.log || [];
-  ex.log.push({event:'Übung gestartet (Briefing abgeschlossen)', time:nowStamp()});
+  ex.log.push({event:'Übung gestartet (Briefing abgeschlossen)', time:nowStamp(), timeMs:Date.now()});
   await saveKey('exercises', St.exercises);
   toast('Übung gestartet');
   St.currentExerciseId = exId;
@@ -1481,6 +1572,7 @@ function openPatient(pid){
   St.currentPatientId = pid;
   St.reveal = {};
   St.selectedBodyPart = null;
+  St.patientOpenedAtMs = Date.now(); // für Debriefing: Sichtungsdauer = Zeit bis zur ersten Kategorie-Vergabe
   stopTimer();
   setPatientUrlParam(St.currentExerciseId, pid);
   go('sichtung');
@@ -1531,10 +1623,14 @@ async function setTriage(cat){
   if(!exId || !pid) return;
   St.sichtungen[exId] = St.sichtungen[exId] || [];
   let rec = St.sichtungen[exId].find(r=>r.patientId===pid && r.username===St.user.username);
-  if(rec){ rec.kategorie = cat; rec.updatedAt = nowStamp(); }
+  if(rec){ rec.kategorie = cat; rec.updatedAt = nowStamp(); rec.updatedAtMs = Date.now(); }
   else{
+    // Sichtungsdauer nur bei der ERSTEN Kategorie-Vergabe für diesen Patienten festhalten
+    // (spätere Korrekturen der Kategorie sollen die einmal gemessene Dauer nicht verfälschen).
+    const dauerSekunden = St.patientOpenedAtMs ? Math.max(0, Math.round((Date.now()-St.patientOpenedAtMs)/1000)) : null;
     St.sichtungen[exId].push({patientId:pid, username:St.user.username, role:St.currentRole,
-      kategorie:cat, timestamp:nowStamp(), updatedAt:nowStamp()});
+      kategorie:cat, timestamp:nowStamp(), timestampMs:Date.now(), updatedAt:nowStamp(), updatedAtMs:Date.now(),
+      dauerSekunden});
   }
   await saveKey('sichtungen_index', St.sichtungen);
   render();
@@ -1795,6 +1891,8 @@ WICHTIG: Halte JEDEN Textwert sehr kurz und knapp (max. ca. 8-10 Wörter, Stichw
 
         arr.forEach(pat=>{
           pat.id = nextId++;
+          pat.typ = classifyScenario(scenario);
+          pat.szenarioTags = scenario || '';
           St.patients.push(pat);
         });
         created += arr.length;
@@ -2028,6 +2126,15 @@ function openCreateExerciseModal(){
           </label>
         </div>
       </div>
+      <div class="field">
+        <label>Anzahl Patienten für diese Übung</label>
+        <input id="ex-patientcount" type="number" min="1" max="100" value="20">
+        <p class="small" style="margin-top:4px;">
+          Variante 2 (Übersicht): Es werden genau so viele zum Szenario passende Patienten aus der
+          Datenbank für diese Übung ausgewählt. Variante 1 (QR): dient nur als Planungsgröße — welche
+          Patienten tatsächlich vorkommen, entscheidet sich durch die tatsächlich gescannten QR-Codes.
+        </p>
+      </div>
       <p class="small">Krankenhäuser können nach dem Erstellen über "Bearbeiten" hinzugefügt werden.</p>
       <button class="btn btn-primary" style="width:100%" onclick="createExercise(
         document.getElementById('ex-name').value,
@@ -2036,7 +2143,8 @@ function openCreateExerciseModal(){
         document.getElementById('ex-datum').value,
         document.getElementById('ex-uhrzeit').value,
         document.getElementById('ex-wetter').value,
-        document.querySelector('input[name=\"ex-modus\"]:checked').value);closeModal();">Erstellen</button>
+        document.querySelector('input[name=ex-modus]:checked').value,
+        document.getElementById('ex-patientcount').value);closeModal();">Erstellen</button>
     </div>
   </div>`;
   render();
@@ -2078,6 +2186,16 @@ function openExerciseEditModal(exId){
           </label>
         </div>
       </div>
+      <div class="field">
+        <label>Anzahl Patienten</label>
+        <input id="exe__patientcount" type="number" min="1" max="100" value="${ex.patientCount||20}">
+        <p class="small" style="margin-top:4px;">
+          Bei Variante 2 (Übersicht) wählt "Neu auswählen" genau so viele zum (ggf. geänderten) Szenario
+          passende Patienten neu aus der Datenbank aus — die bisherige Auswahl für diese Übung wird ersetzt.
+          Bei Variante 1 (QR) ist die Zahl nur ein Planungswert.
+        </p>
+        ${ex.modus==='liste' ? `<button class="btn btn-sm" onclick="regenerateExercisePatients('${exId}')">🎲 Patienten neu auswählen</button>` : ''}
+      </div>
       <button class="btn btn-primary" style="width:100%" onclick="saveExerciseDetails('${exId}')">Änderungen speichern</button>
 
       <div class="section-title">Nächstgelegene Krankenhäuser</div>
@@ -2115,15 +2233,19 @@ function closeModal(){ modalHtml=''; render(); }
 /* ====================== RENDER: PATIENTS OVERVIEW ====================== */
 function viewPatients(){
   const exId = St.currentExerciseId;
+  const ex = St.exercises.find(e=>e.id===exId);
   const list = St.sichtungen[exId] || [];
-  const tiles = St.patients.map(p=>{
+  const relevantPatients = (ex && ex.patientIds && ex.patientIds.length)
+    ? St.patients.filter(p=>ex.patientIds.includes(p.id))
+    : St.patients;
+  const tiles = relevantPatients.map(p=>{
     const done = list.some(r=>r.patientId===p.id && r.username===St.user.username && r.kategorie);
     return `<div class="id-tile ${done?'done':''}" onclick="openPatient(${p.id})">${p.id}</div>`;
   }).join('');
   return `
   <div class="wrap">
     <h1>Patientenübersicht</h1>
-    <p>Rolle: <span class="badge-role">${St.currentRole}</span></p>
+    <p>Rolle: <span class="badge-role">${St.currentRole}</span> · ${relevantPatients.length} Patienten in dieser Übung</p>
     <div class="grid" style="margin-top:16px;">${tiles || '<div class="empty">Keine Patienten in der Datenbank</div>'}</div>
   </div>`;
 }
@@ -2365,6 +2487,180 @@ function viewTrainerBriefing(){
   </div>`;
 }
 
+function formatDuration(totalSeconds){
+  if(totalSeconds==null) return 'nicht verfügbar';
+  const h = Math.floor(totalSeconds/3600);
+  const m = Math.floor((totalSeconds%3600)/60);
+  const s = Math.round(totalSeconds%60);
+  if(h>0) return `${h} Std. ${m} Min. ${s} Sek.`;
+  if(m>0) return `${m} Min. ${s} Sek.`;
+  return `${s} Sek.`;
+}
+
+// Berechnet alle Fazit-Kennzahlen für das Debriefing einer Übung: Gesamtzeit, Durchschnitts-
+// Sichtungszeit, Anzahl richtig/falsch gesichteter Patienten.
+function computeDebriefingStats(exId){
+  const ex = St.exercises.find(e=>e.id===exId);
+  const log = (ex && ex.log) || [];
+  const startEntry = log.find(l=>l.event==='Übung gestartet (Briefing abgeschlossen)' || l.event==='status:läuft');
+  const endCandidates = log.filter(l=>l.event==='status:beendet');
+  const endEntry = endCandidates.length ? endCandidates[endCandidates.length-1] : null;
+  let gesamtzeitSek = null;
+  if(startEntry && endEntry && startEntry.timeMs && endEntry.timeMs && endEntry.timeMs>=startEntry.timeMs){
+    gesamtzeitSek = Math.round((endEntry.timeMs - startEntry.timeMs)/1000);
+  }
+
+  const list = (St.sichtungen[exId]||[]).filter(r=>r.kategorie);
+  let correct=0, wrong=0;
+  list.forEach(r=>{
+    const p = St.patients.find(pp=>pp.id===r.patientId);
+    if(p){ if(p.kategorieReal===r.kategorie) correct++; else wrong++; }
+  });
+  const durations = list.map(r=>r.dauerSekunden).filter(d=>d!=null && d>=0);
+  const avgDurationSek = durations.length ? Math.round(durations.reduce((a,b)=>a+b,0)/durations.length) : null;
+
+  return {
+    startEntry, endEntry, gesamtzeitSek,
+    totalGesichtet: list.length, correct, wrong, avgDurationSek,
+    durationsCount: durations.length
+  };
+}
+
+// Führt Übungs-Log (Statuswechsel/Buttons im Cockpit) und Sichtungsergebnisse zu EINER
+// chronologischen Liste zusammen, wie für die Debriefing-Seite gefordert.
+function buildDebriefingTimeline(exId){
+  const ex = St.exercises.find(e=>e.id===exId);
+  const entries = [];
+  (ex && ex.log || []).forEach(l=>{
+    entries.push({ time:l.time, timeMs:l.timeMs||0, text:`⚙ ${l.event}`, kind:'log' });
+  });
+  (St.sichtungen[exId]||[]).forEach(r=>{
+    if(!r.kategorie) return;
+    const p = St.patients.find(pp=>pp.id===r.patientId);
+    const match = p ? (p.kategorieReal===r.kategorie ? '✓ korrekt' : '✕ falsch') : '';
+    entries.push({ time:r.timestamp, timeMs:r.timestampMs||0,
+      text:`🩺 ${r.username} (${r.role}) sichtete Patient #${r.patientId} mit ${CAT_LABEL[r.kategorie]} ${match?'– '+match:''}`,
+      kind:'sichtung' });
+  });
+  entries.sort((a,b)=> (a.timeMs||0)-(b.timeMs||0) || (a.time||'').localeCompare(b.time||''));
+  return entries;
+}
+
+function viewDebriefing(){
+  const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
+  if(!ex) return `<div class="wrap"><div class="empty">Keine Übung ausgewählt.</div>
+    <button class="btn" onclick="go('exercises')">Zu den Übungen</button></div>`;
+  const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+  const hospChips = (ex.krankenhaeuser||[]).map(h=>`<span class="chip">🏥 ${h.name} · ${h.km} km</span>`).join('')
+    || '<span class="small">Keine hinterlegt</span>';
+  const stats = computeDebriefingStats(ex.id);
+  const timeline = buildDebriefingTimeline(ex.id);
+  const timelineRows = timeline.map(t=>`<tr><td style="white-space:nowrap;">${t.time}</td><td>${t.text}</td></tr>`).join('')
+    || `<tr><td colspan="2" class="empty">Noch keine Ereignisse erfasst</td></tr>`;
+  const briefingFields = [
+    ['Einsatzstichwort', ex.einsatzstichwort], ['Alarmierte Kräfte', ex.alarmierteKraefte],
+    ['Eingetroffene Kräfte', ex.eingetroffeneKraefte], ['Rückmeldungen', ex.rueckmeldungen],
+    ['Aufstellfläche', ex.aufstellflaeche], ['Anfahrtswege', ex.anfahrtswege],
+    ['Einsatzstelle', ex.einsatzstelleSicher], ['Einsatzgrenzen / Gefahrenbereiche', ex.einsatzgrenzen]
+  ].filter(([,v])=>v);
+
+  return `
+  <div class="wrap">
+    <button class="btn" onclick="go('cockpit')">← Zurück zum Cockpit</button>
+    <div class="card" style="margin-top:14px;border-left:5px solid var(--navy);">
+      <div class="small" style="letter-spacing:.12em;text-transform:uppercase;color:var(--navy);font-weight:800;">🧾 Debriefing</div>
+      <h1 style="margin-top:4px;">${ex.name} <span class="tag tag-status">${ex.status}</span></h1>
+      ${meta?`<p class="small">${meta}</p>`:''}
+
+      <div class="section-title" style="margin-top:18px;">Einsatzdaten</div>
+      <div class="value-box"><div class="lbl">Szenario / Lage</div><div class="val">${ex.scenario||'—'}</div></div>
+      ${briefingFields.map(([k,v])=>`<div class="value-box"><div class="lbl">${k}</div><div class="val">${v}</div></div>`).join('')}
+      <div class="section-title">Nächstgelegene Krankenhäuser</div>
+      <div class="row" style="flex-wrap:wrap;gap:6px;">${hospChips}</div>
+
+      <div class="section-title">Chronologischer Verlauf</div>
+      <table><thead><tr><th>Zeit</th><th>Ereignis</th></tr></thead><tbody>${timelineRows}</tbody></table>
+
+      <div class="section-title">Fazit der Übung</div>
+      <div class="vitals-grid">
+        <div class="value-box"><div class="lbl">Gesamtzeit der Übung</div><div class="val">${formatDuration(stats.gesamtzeitSek)}</div></div>
+        <div class="value-box"><div class="lbl">Ø Sichtungszeit pro Patient</div><div class="val">${formatDuration(stats.avgDurationSek)}${stats.durationsCount?` (aus ${stats.durationsCount} Messwerten)`:''}</div></div>
+        <div class="value-box"><div class="lbl">Gesichtete Patienten gesamt</div><div class="val">${stats.totalGesichtet}</div></div>
+        <div class="value-box"><div class="lbl">Richtig gesichtet</div><div class="val" style="color:var(--green);font-weight:700;">${stats.correct}</div></div>
+        <div class="value-box"><div class="lbl">Falsch gesichtet</div><div class="val" style="color:var(--red);font-weight:700;">${stats.wrong}</div></div>
+      </div>
+      ${(!stats.startEntry || !stats.endEntry) ? `<p class="small">Hinweis: Für die Gesamtzeit müssen sowohl ein Start- als auch ein Ende-Zeitpunkt der Übung erfasst sein (Übung über Briefing/Cockpit starten und über "⏹ Beenden" abschließen).</p>` : ''}
+
+      <div class="divider"></div>
+      <div class="row">
+        <button class="btn btn-primary" onclick="exportDebriefingPdf('${ex.id}')">📄 Als PDF erzeugen / drucken</button>
+        <button class="btn" onclick="emailDebriefing('${ex.id}')">✉️ Per E-Mail versenden</button>
+      </div>
+      <p class="small">Der PDF-Export öffnet den Druckdialog deines Browsers — dort kannst du direkt drucken oder "Als PDF speichern" wählen. Der E-Mail-Button öffnet dein Standard-Mailprogramm mit einer Zusammenfassung im Text; die PDF-Datei musst du dort manuell anhängen, da ein direkter Versand aus dem Browser heraus technisch nicht möglich ist.</p>
+    </div>
+  </div>`;
+}
+
+function exportDebriefingPdf(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+  const stats = computeDebriefingStats(exId);
+  const timeline = buildDebriefingTimeline(exId);
+  const timelineRows = timeline.map(t=>`<tr><td>${t.time}</td><td>${t.text.replace(/[⚙🩺✓✕]/g,'').trim()}</td></tr>`).join('')
+    || '<tr><td colspan="2">Keine Ereignisse erfasst</td></tr>';
+  const briefingFields = [
+    ['Einsatzstichwort', ex.einsatzstichwort], ['Alarmierte Kräfte', ex.alarmierteKraefte],
+    ['Eingetroffene Kräfte', ex.eingetroffeneKraefte], ['Rückmeldungen', ex.rueckmeldungen],
+    ['Aufstellfläche', ex.aufstellflaeche], ['Anfahrtswege', ex.anfahrtswege],
+    ['Einsatzstelle', ex.einsatzstelleSicher], ['Einsatzgrenzen / Gefahrenbereiche', ex.einsatzgrenzen]
+  ].filter(([,v])=>v).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  const html = `<html><head><meta charset="utf-8"><title>${ex.name} – Debriefing</title>
+  <style>body{font-family:sans-serif;padding:24px;} h1{margin-bottom:2px;} h2{margin-top:26px;} table{width:100%;border-collapse:collapse;margin-top:12px;}
+  th,td{border:1px solid #999;padding:6px 8px;font-size:13px;text-align:left;} th{background:#eee;}
+  .fazit td{font-weight:bold;}</style></head>
+  <body>
+  <h1>Debriefing: ${ex.name}</h1>
+  <p>Szenario: ${ex.scenario||'-'}<br>${meta?meta+'<br>':''}Status: ${ex.status}<br>Exportiert: ${nowStamp()}</p>
+  ${briefingFields?`<h2>Einsatzdaten</h2><table><tbody>${briefingFields}</tbody></table>`:''}
+  <h2>Chronologischer Verlauf</h2>
+  <table><thead><tr><th>Zeit</th><th>Ereignis</th></tr></thead><tbody>${timelineRows}</tbody></table>
+  <h2>Fazit</h2>
+  <table class="fazit"><tbody>
+    <tr><td>Gesamtzeit der Übung</td><td>${formatDuration(stats.gesamtzeitSek)}</td></tr>
+    <tr><td>Ø Sichtungszeit pro Patient</td><td>${formatDuration(stats.avgDurationSek)}</td></tr>
+    <tr><td>Gesichtete Patienten gesamt</td><td>${stats.totalGesichtet}</td></tr>
+    <tr><td>Richtig gesichtet</td><td>${stats.correct}</td></tr>
+    <tr><td>Falsch gesichtet</td><td>${stats.wrong}</td></tr>
+  </tbody></table>
+  </body></html>`;
+  const w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  w.print();
+}
+
+function emailDebriefing(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const stats = computeDebriefingStats(exId);
+  const subject = `Debriefing: ${ex.name}`;
+  const bodyLines = [
+    `Debriefing-Zusammenfassung: ${ex.name}`,
+    [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · '),
+    ex.scenario ? `Szenario: ${ex.scenario}` : '',
+    '',
+    `Gesamtzeit der Übung: ${formatDuration(stats.gesamtzeitSek)}`,
+    `Ø Sichtungszeit pro Patient: ${formatDuration(stats.avgDurationSek)}`,
+    `Gesichtete Patienten gesamt: ${stats.totalGesichtet}`,
+    `Richtig gesichtet: ${stats.correct}`,
+    `Falsch gesichtet: ${stats.wrong}`,
+    '',
+    'Hinweis: Bitte den vollständigen Debriefing-Bericht als PDF (Button "Als PDF erzeugen / drucken") separat anhängen.'
+  ].filter(l=>l!==undefined);
+  const body = bodyLines.join('\n');
+  window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
 function viewCockpit(){
   const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
   if(!ex) return `<div class="wrap"><p>Keine Übung ausgewählt.</p></div>`;
@@ -2404,11 +2700,13 @@ function viewCockpit(){
       <button class="btn btn-primary" onclick="setExerciseStatus('${ex.id}','läuft')">▶ Starten</button>
       <button class="btn" onclick="setExerciseStatus('${ex.id}','pausiert')">⏸ Pausieren</button>
       <button class="btn btn-danger" onclick="setExerciseStatus('${ex.id}','beendet')">⏹ Beenden</button>
+      <button class="btn" onclick="St.currentExerciseId='${ex.id}';go('debriefing')">🧾 Debriefing</button>
       <button class="btn" onclick="exportExercisePdf('${ex.id}')">📄 PDF-Bericht erzeugen</button>
       <button class="btn" onclick="openExerciseEditModal('${ex.id}')">⚙ Übung bearbeiten</button>
     </div>
     <div class="card">
-      <p>Gesichtete Patienten: <b>${list.filter(r=>r.kategorie).length}</b> von ${St.patients.length}</p>
+      <p>Gesichtete Patienten: <b>${list.filter(r=>r.kategorie).length}</b> von ${(ex.patientIds&&ex.patientIds.length)?ex.patientIds.length:St.patients.length}${ex.modus==='qr'?' (Planwert: '+(ex.patientCount||'-')+')':''}</p>
+      ${ex.modus==='qr' ? `<p class="small">QR-Modus: Es zählen automatisch alle Patienten, deren QR-Code tatsächlich gescannt wurde — unabhängig vom oben eingestellten Planwert.</p>` : ''}
       <table><thead><tr><th>Zeit</th><th>Teilnehmer</th><th>Rolle</th><th>Patient</th>
         <th>Gesichtet mit</th><th>Reale Kategorie</th><th>Abgleich</th><th>Krankenhaus</th></tr></thead>
         <tbody>${rows}</tbody></table>
@@ -2512,16 +2810,17 @@ function adminPatients(){
       <td>${p.alter}</td>
       <td>${p.geschlecht}</td>
       <td><span class="tag tag-${p.kategorieReal}">${CAT_LABEL[p.kategorieReal]}</span></td>
+      <td><span class="small">${(p.typ||'trauma')==='erkrankung'?'Erkrankung':'Trauma'}</span></td>
       <td><button class="btn btn-sm" onclick="openPatientEdit(${p.id})">Bearbeiten</button>
       <button class="btn btn-sm" onclick="openChangeIdModal(${p.id})">ID ändern</button>
       <button class="btn btn-sm" onclick="showPatientQr(${p.id})">QR-Code</button>
       <button class="btn btn-sm btn-danger" onclick="deletePatient(${p.id})">Löschen</button></td>
-    </tr>`).join('') || `<tr><td colspan="6" class="empty">Keine Patienten</td></tr>`;
+    </tr>`).join('') || `<tr><td colspan="7" class="empty">Keine Patienten</td></tr>`;
 
   return `${genBox}${qrBox}
   <div class="card">
     <h3>Patienten (${St.patients.length})</h3>
-    <table><thead><tr><th>ID</th><th>Name</th><th>Alter</th><th>Geschlecht</th><th>Kategorie</th><th></th></tr></thead>
+    <table><thead><tr><th>ID</th><th>Name</th><th>Alter</th><th>Geschlecht</th><th>Kategorie</th><th>Ereignisart</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table>
   </div>`;
 }
@@ -2577,6 +2876,12 @@ function openPatientEdit(pid){
       <div class="field"><label>Reale Sichtungskategorie</label>
         <select id="pe__basis__kategorieReal">${CATS.map(c=>`<option value="${c}" ${p.kategorieReal===c?'selected':''}>${CAT_LABEL[c]}</option>`).join('')}</select>
       </div>
+      <div class="field"><label>Ereignisart (für Szenario-Zuordnung bei Übungen)</label>
+        <select id="pe__basis__typ">
+          <option value="trauma" ${(p.typ||'trauma')==='trauma'?'selected':''}>Trauma / Verletzung</option>
+          <option value="erkrankung" ${p.typ==='erkrankung'?'selected':''}>Erkrankung / Infektion</option>
+        </select>
+      </div>
 
       ${groupsHtml}
 
@@ -2598,6 +2903,7 @@ async function collectAndSavePatient(pid){
   p.gehfaehigkeit = getVal('pe__basis__gehfaehigkeit');
   p.befunde = getVal('pe__basis__befunde');
   p.kategorieReal = getVal('pe__basis__kategorieReal');
+  p.typ = getVal('pe__basis__typ');
 
   Object.keys(EDIT_SCHEMA).forEach(group=>{
     const def = EDIT_SCHEMA[group];
@@ -2692,6 +2998,7 @@ function render(){
     else if(St.route==='sichtung') body += viewSichtung();
     else if(St.route==='cockpit') body += viewCockpit();
     else if(St.route==='briefing') body += viewTrainerBriefing();
+    else if(St.route==='debriefing') body += viewDebriefing();
     else if(St.route==='admin') body += viewAdmin();
     else body += viewExercises();
   }
