@@ -256,8 +256,6 @@ const St = {
   currentRole:null,
   currentPatientId:null,
   patientOpenedAtMs:null,
-  authToken:null,
-  pendingVerifyUsername:null,
   selectedBodyPart:null,
   reveal:{},           // fieldKey -> true, reset per patient view
   timer:{active:false,field:null,remaining:0,intervalId:null},
@@ -311,38 +309,6 @@ async function verifyPassword(userObj, plainPassword){
 }
 function nowStamp(){ return new Date().toLocaleString('de-DE'); }
 
-/* ====================== SERVER-AUTH (sicher) MIT LOKALEM FALLBACK ======================
-   Ruft die serverseitige Funktion netlify/functions/auth.js auf, die Passwörter gehasht
-   auf dem Server hält und niemals im Browser sichtbar macht. Ist die Funktion (noch) nicht
-   eingerichtet (siehe DEPLOYMENT.md), liefert sie eine erkennbare "nicht konfiguriert"-
-   Meldung — in diesem Fall greift die App automatisch auf die einfachere, rein clientseitige
-   Absicherung (siehe setPasswordHash/verifyPassword) zurück, damit Login/Registrierung immer
-   funktionieren. E-Mail-Verifizierung ist NUR über die Server-Funktion möglich. */
-const AUTH_API = '/.netlify/functions/auth';
-async function callAuthApi(payload){
-  try{
-    const resp = await fetch(AUTH_API, {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
-    });
-    const data = await resp.json();
-    if(data && data.ok===false && /Server nicht konfiguriert/i.test(data.error||'')){
-      return null; // Signal: Fallback auf lokale Absicherung nutzen
-    }
-    return data;
-  }catch(e){
-    console.error('Auth-API nicht erreichbar, nutze lokalen Fallback', e);
-    return null;
-  }
-}
-function saveAuthToken(token){
-  if(!HAS_LOCALSTORAGE) return;
-  try{ token ? localStorage.setItem('mstart_auth_token', token) : localStorage.removeItem('mstart_auth_token'); }catch(e){}
-}
-function loadAuthToken(){
-  if(!HAS_LOCALSTORAGE) return null;
-  try{ return localStorage.getItem('mstart_auth_token'); }catch(e){ return null; }
-}
-
 function toast(msg){
   const t=document.createElement('div');
   t.className='toast'; t.textContent=msg;
@@ -356,31 +322,18 @@ function toast(msg){
 // QR-Code, öffnet sich eine KOMPLETT NEUE URL (z.B. .../?pid=12) ohne diesen Hash, wodurch die
 // Anmeldung verloren ginge. localStorage ist an den Browser/das Gerät gebunden, nicht an eine
 // bestimmte URL, und übersteht daher auch eine neue Navigation durch einen QR-Scan.
-// Gespeichert wird das GESAMTE (unkritische) Profil, nicht nur der Benutzername — damit die
-// Sitzung auch dann wiederhergestellt werden kann, wenn der direkte Lesezugriff auf die
-// Nutzerdatenbank serverseitig gesperrt ist (siehe DEPLOYMENT.md, gehärtete Firestore-Regeln)
-// und Login ausschließlich über die Server-Funktion läuft.
-const LS_LOGIN_KEY = 'mstart_login_profile';
-function saveLoginSession(userObj, token){
+const LS_LOGIN_KEY = 'mstart_login_username';
+function saveLoginSession(username){
   if(!HAS_LOCALSTORAGE) return;
-  try{
-    localStorage.setItem(LS_LOGIN_KEY, JSON.stringify({
-      username:userObj.username, email:userObj.email, role:userObj.role, locked:!!userObj.locked
-    }));
-  }catch(e){}
-  saveAuthToken(token || null);
+  try{ localStorage.setItem(LS_LOGIN_KEY, username); }catch(e){}
 }
 function restoreLoginSession(){
   if(!HAS_LOCALSTORAGE) return null;
-  try{
-    const raw = localStorage.getItem(LS_LOGIN_KEY);
-    return raw ? JSON.parse(raw) : null;
-  }catch(e){ return null; }
+  try{ return localStorage.getItem(LS_LOGIN_KEY); }catch(e){ return null; }
 }
 function clearLoginSession(){
   if(!HAS_LOCALSTORAGE) return;
   try{ localStorage.removeItem(LS_LOGIN_KEY); }catch(e){}
-  saveAuthToken(null);
 }
 // Merkt sich zusätzlich zum Login auch die aktuell beigetretene Übung + Rolle im Browser
 // (localStorage), damit ein QR-Code-Scan in einem neuen Tab/einer neuen Kamera-App-Session
@@ -422,12 +375,14 @@ async function init(){
     St.pendingDeepLink = {pid: parseInt(params.get('pid'))};
   }
 
-  // Lokaler Nutzer-Cache: dient nur noch dem Fallback-Betrieb (ohne eingerichtete
-  // Server-Auth-Funktion bzw. vor dem Aktivieren der gehärteten Firestore-Regeln).
-  // Ist die Server-Funktion aktiv, bleibt dieser Cache leer/ungenutzt für den Login
-  // selbst — die eigentliche Nutzerdatenbank liegt dann ausschließlich serverseitig.
-  St.users = (await loadKey('users', null)) || {};
-
+  St.users = await loadKey('users', null);
+  if(!St.users){
+    const adminUser = {username:'Martin', email:'admin@example.org', role:'admin',
+      locked:false, createdAt:nowStamp(), lastLogin:null};
+    await setPasswordHash(adminUser, '1234');
+    St.users = { 'Martin': adminUser };
+    await saveKey('users', St.users);
+  }
   St.patients = await loadKey('patients', null);
   if(!St.patients){
     St.patients = seedPatients();
@@ -437,36 +392,18 @@ async function init(){
   const sichtRaw = await loadKey('sichtungen_index', {});
   St.sichtungen = sichtRaw;
 
-  // Prüfen, ob überhaupt schon ein Konto existiert. Es gibt bewusst KEIN im Quelltext
-  // hinterlegtes Standard-Konto mehr (frühere Version: "Martin"/"1234") — beim allerersten
-  // Start muss die Person mit Hosting-/Deploy-Zugriff selbst ein Admin-Konto anlegen.
-  const setupCheck = await callAuthApi({action:'checkSetup'});
-  let needsSetup = false;
-  if(setupCheck){ // Server-Auth aktiv und erreichbar
-    needsSetup = !!setupCheck.needsSetup;
-  }else{ // Fallback: keine Server-Funktion konfiguriert
-    needsSetup = Object.keys(St.users).length === 0;
-  }
-
-  if(needsSetup){
-    St.route = 'setup';
-    render();
-    return;
-  }
-
-  // Login-Session wiederherstellen (localStorage — übersteht auch eine neue URL durch QR-Scan).
-  // Das gespeicherte Profil wird direkt genutzt, unabhängig davon, ob St.users (lokaler
-  // Fallback-Cache) überhaupt gefüllt werden darf.
-  const savedProfile = restoreLoginSession();
-  const savedToken = loadAuthToken();
-  if(savedProfile && !savedProfile.locked){
-    St.user = savedProfile;
-    St.authToken = savedToken;
-    St.users[savedProfile.username] = savedProfile; // für Anzeigezwecke im lokalen Cache spiegeln
-    St.route = savedProfile.role==='admin' ? 'admin' : 'exercises';
-    restoreExerciseSession();
-  }else if(savedProfile && savedProfile.locked){
-    clearLoginSession();
+  // Login-Session wiederherstellen (localStorage — übersteht auch eine neue URL durch QR-Scan),
+  // danach ggf. auch die zuletzt beigetretene Übung/Rolle wiederherstellen.
+  const savedUsername = restoreLoginSession();
+  if(savedUsername){
+    const u = St.users[savedUsername];
+    if(u && !u.locked){
+      St.user = u;
+      St.route = u.role==='admin' ? 'admin' : 'exercises';
+      restoreExerciseSession();
+    }else{
+      clearLoginSession();
+    }
   }
 
   if(St.user){ tryHandleDeepLink(); }
@@ -1431,23 +1368,10 @@ async function regenerateDefault100(){
 /* ====================== NAV ====================== */
 function go(route){ St.route = route; render(); window.scrollTo(0,0); }
 
-function logout(){ St.user=null; St.currentExerciseId=null; St.currentRole=null; St.authToken=null; clearLoginSession(); clearExerciseSession(); go('login'); }
+function logout(){ St.user=null; St.currentExerciseId=null; St.currentRole=null; clearLoginSession(); clearExerciseSession(); go('login'); }
 
 /* ====================== AUTH ====================== */
 async function doLogin(username, password){
-  if(!username || !password){ toast('Bitte Benutzername und Passwort eingeben'); return; }
-  const apiResult = await callAuthApi({action:'login', username, password});
-  if(apiResult){
-    if(!apiResult.ok){ toast(apiResult.error||'Anmeldung fehlgeschlagen'); return; }
-    St.user = apiResult.user;
-    St.users[apiResult.user.username] = apiResult.user;
-    St.authToken = apiResult.token;
-    saveLoginSession(apiResult.user, apiResult.token);
-    const handled = tryHandleDeepLink();
-    if(!handled){ go(apiResult.user.role==='admin' ? 'admin' : 'exercises'); }
-    return;
-  }
-  // Fallback: keine Server-Funktion konfiguriert -> rein lokale Prüfung
   const u = St.users[username];
   if(!u){ toast('Benutzer nicht gefunden'); return; }
   if(u.locked){ toast('Konto gesperrt – bitte Admin kontaktieren'); return; }
@@ -1456,42 +1380,20 @@ async function doLogin(username, password){
   u.lastLogin = nowStamp();
   await saveKey('users', St.users);
   St.user = u;
-  saveLoginSession(u, null);
+  saveLoginSession(u.username);
   const handled = tryHandleDeepLink();
   if(!handled){ go(u.role==='admin' ? 'admin' : 'exercises'); }
 }
 
 async function doRegister(username, password, email){
   if(!username || !password || !email){ toast('Bitte alle Felder ausfüllen'); return; }
-  const apiResult = await callAuthApi({action:'register', username, password, email});
-  if(apiResult){
-    if(!apiResult.ok){ toast(apiResult.error||'Registrierung fehlgeschlagen'); return; }
-    if(apiResult.emailSent){
-      St.pendingVerifyUsername = username;
-      go('registerPending');
-    }else{
-      toast('Registrierung erfolgreich – du kannst dich jetzt anmelden');
-      go('login');
-    }
-    return;
-  }
-  // Fallback: keine Server-Funktion konfiguriert -> lokale Registrierung ohne E-Mail-Verifizierung
-  // (echte Verifizierungs-Mails sind ohne Server-Funktion technisch nicht möglich)
   if(St.users[username]){ toast('Benutzername bereits vergeben'); return; }
-  const newUser = {username, email, role:'teilnehmer', locked:false, createdAt:nowStamp(), lastLogin:null,
-    emailVerified:true};
+  const newUser = {username, email, role:'teilnehmer', locked:false, createdAt:nowStamp(), lastLogin:null};
   await setPasswordHash(newUser, password);
   St.users[username] = newUser;
   await saveKey('users', St.users);
   toast('Registrierung erfolgreich – du kannst dich jetzt anmelden');
   go('login');
-}
-
-async function resendVerificationEmail(username){
-  const r = await callAuthApi({action:'resendVerification', username});
-  if(!r){ toast('Server nicht erreichbar'); return; }
-  if(!r.ok){ toast(r.error||'Fehler beim Senden'); return; }
-  toast('Bestätigungs-Mail erneut gesendet');
 }
 
 // ====================== SZENARIO-KLASSIFIZIERUNG & PATIENTENAUSWAHL ======================
@@ -2060,40 +1962,14 @@ WICHTIG: Halte JEDEN Textwert sehr kurz und knapp (max. ca. 8-10 Wörter, Stichw
 }
 
 /* ====================== ADMIN: USERS ====================== */
-async function refreshUsersFromApi(){
-  if(!St.authToken) return false;
-  const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'listUsers'});
-  if(!r || !r.ok) return false;
-  const fresh = {};
-  r.users.forEach(u=>{ fresh[u.username] = u; });
-  St.users = fresh;
-  return true;
-}
-async function goAdminTab(tab){
-  St.adminTab = tab;
-  render();
-  if(tab==='nutzer'){
-    const changed = await refreshUsersFromApi();
-    if(changed) render();
-  }
-}
-
 async function toggleLock(username){
   const u = St.users[username]; if(!u) return;
-  if(St.authToken){
-    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'toggleLock', opPayload:{username}});
-    if(r){ if(!r.ok){ toast(r.error||'Fehler'); return; } u.locked = r.locked; render(); return; }
-  }
   u.locked = !u.locked;
   await saveKey('users', St.users);
   render();
 }
 async function deleteUser(username){
-  if(St.user && St.user.username===username){ toast('Du kannst dein eigenes Konto hier nicht löschen'); return; }
-  if(St.authToken){
-    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'deleteUser', opPayload:{username}});
-    if(r){ if(!r.ok){ toast(r.error||'Fehler'); return; } delete St.users[username]; toast('Nutzer gelöscht'); render(); return; }
-  }
+  if(username==='Martin'){ toast('Admin Martin kann nicht gelöscht werden'); return; }
   delete St.users[username];
   await saveKey('users', St.users);
   render();
@@ -2105,8 +1981,7 @@ function openSetPasswordModal(username){
       <span class="close-x" onclick="closeModal()">✕</span>
       <h2>Neues Passwort für ${username}</h2>
       <div class="field"><label>Neues Passwort</label><input id="np-pass" type="text" placeholder="Mindestens 3 Zeichen"></div>
-      <p class="small">Das Passwort wird sofort gesetzt. Da kein echter E-Mail-Versand des Passworts selbst
-        vorgesehen ist, teile es dem Nutzer bitte auf einem sicheren Weg selbst mit.</p>
+      <p class="small">Das Passwort wird sofort gesetzt. Da kein echter E-Mail-Versand möglich ist, teile es dem Nutzer bitte selbst mit.</p>
       <button class="btn btn-primary" style="width:100%" onclick="setUserPassword('${username}', document.getElementById('np-pass').value)">Passwort setzen</button>
     </div>
   </div>`;
@@ -2114,10 +1989,6 @@ function openSetPasswordModal(username){
 }
 async function setUserPassword(username, newPassword){
   if(!newPassword || newPassword.length<3){ toast('Bitte ein Passwort mit mindestens 3 Zeichen eingeben'); return; }
-  if(St.authToken){
-    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'setPassword', opPayload:{username, newPassword}});
-    if(r){ if(!r.ok){ toast(r.error||'Fehler'); return; } toast('Passwort für '+username+' aktualisiert'); closeModal(); return; }
-  }
   const u = St.users[username]; if(!u) return;
   await setPasswordHash(u, newPassword);
   await saveKey('users', St.users);
@@ -2126,10 +1997,7 @@ async function setUserPassword(username, newPassword){
 }
 async function assignRole(username, role){
   const u = St.users[username]; if(!u) return;
-  if(St.authToken){
-    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'assignRole', opPayload:{username, role}});
-    if(r){ if(!r.ok){ toast(r.error||'Fehler'); render(); return; } u.role = role; render(); return; }
-  }
+  if(u.role==='admin' && role!=='admin'){ /* only admin can demote admin, allowed here since only admin sees this */ }
   u.role = role;
   await saveKey('users', St.users);
   render();
@@ -2163,19 +2031,9 @@ function openCreateUserModal(){
 async function createUserByAdmin(username, password, email, role){
   username = (username||'').trim();
   if(!username || !password || password.length<3){ toast('Benutzername und ein Passwort mit mind. 3 Zeichen erforderlich'); return; }
-  if(St.authToken){
-    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'createUser', opPayload:{username, password, email, role}});
-    if(r){
-      if(!r.ok){ toast(r.error||'Fehler'); return; }
-      await refreshUsersFromApi();
-      toast('Nutzer '+username+' angelegt');
-      closeModal();
-      return;
-    }
-  }
   if(St.users[username]){ toast('Benutzername bereits vergeben'); return; }
   const newUser = {username, email:email||'', role: role||'teilnehmer', locked:false,
-    createdAt:nowStamp(), lastLogin:null, emailVerified:true};
+    createdAt:nowStamp(), lastLogin:null};
   await setPasswordHash(newUser, password);
   St.users[username] = newUser;
   const ok = await saveKeyRetry('users', St.users);
@@ -2186,22 +2044,21 @@ async function createUserByAdmin(username, password, email, role){
 
 function openEditUserModal(username){
   const u = St.users[username]; if(!u) return;
-  const isSelf = St.user && St.user.username===username;
   modalHtml = `
   <div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal">
       <span class="close-x" onclick="closeModal()">✕</span>
       <h2>Nutzer bearbeiten</h2>
-      <div class="field"><label>Benutzername</label><input id="eu-user" value="${u.username}"></div>
+      <div class="field"><label>Benutzername</label><input id="eu-user" value="${u.username}" ${u.username==='Martin'?'disabled':''}></div>
+      ${u.username==='Martin'?'<p class="small">Der Benutzername des Haupt-Admins Martin kann nicht geändert werden.</p>':''}
       <div class="field"><label>E-Mail</label><input id="eu-mail" type="email" value="${u.email||''}"></div>
       <div class="field"><label>Rolle</label>
-        <select id="eu-role" ${isSelf?'disabled':''}>
+        <select id="eu-role" ${u.username==='Martin'?'disabled':''}>
           ${['teilnehmer','uebungsleiter','admin'].map(r=>`<option value="${r}" ${u.role===r?'selected':''}>${r}</option>`).join('')}
         </select>
       </div>
-      ${isSelf?'<p class="small">Du kannst deine eigene Rolle und deinen eigenen Sperrstatus hier nicht ändern.</p>':''}
       <div class="field"><label>Status</label>
-        <select id="eu-locked" ${isSelf?'disabled':''}>
+        <select id="eu-locked">
           <option value="0" ${!u.locked?'selected':''}>aktiv</option>
           <option value="1" ${u.locked?'selected':''}>gesperrt</option>
         </select>
@@ -2213,35 +2070,19 @@ function openEditUserModal(username){
 }
 async function saveEditedUser(oldUsername){
   const u = St.users[oldUsername]; if(!u) return;
-  const isSelf = St.user && St.user.username===oldUsername;
   const getVal = (id)=>{ const el = document.getElementById(id); return el ? el.value : ''; };
   const newUsername = (getVal('eu-user')||oldUsername).trim();
   const newEmail = getVal('eu-mail');
-  const newRole = isSelf ? u.role : getVal('eu-role');
-  const newLocked = isSelf ? !!u.locked : getVal('eu-locked')==='1';
+  const newRole = oldUsername==='Martin' ? 'admin' : getVal('eu-role');
+  const newLocked = getVal('eu-locked')==='1';
 
   if(!newUsername){ toast('Benutzername darf nicht leer sein'); return; }
-  if(newUsername!==oldUsername && St.users[newUsername]){ toast('Dieser Benutzername ist bereits vergeben'); return; }
 
-  if(St.authToken){
-    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'editUser', opPayload:{
-      oldUsername, newUsername: newUsername!==oldUsername?newUsername:undefined, email:newEmail, role:newRole, locked:newLocked
-    }});
-    if(r){
-      if(!r.ok){ toast(r.error||'Fehler'); return; }
-      await refreshUsersFromApi();
-      if(isSelf && r.finalUsername && r.finalUsername!==oldUsername){
-        St.user = St.users[r.finalUsername];
-        saveLoginSession(St.user, St.authToken);
-      }
-      toast('Nutzer gespeichert');
-      closeModal();
-      return;
-    }
-  }
-
-  // Fallback ohne Server-Funktion
   if(newUsername !== oldUsername){
+    if(oldUsername==='Martin'){ toast('Der Benutzername von Martin kann nicht geändert werden'); return; }
+    if(St.users[newUsername]){ toast('Dieser Benutzername ist bereits vergeben'); return; }
+    // Benutzernamen überall konsistent umbenennen, damit keine verwaisten Referenzen entstehen:
+    // Übungsteilnahmen, Übungs-Ersteller sowie alle bereits erfassten Sichtungsergebnisse.
     delete St.users[oldUsername];
     u.username = newUsername;
     St.users[newUsername] = u;
@@ -2257,10 +2098,11 @@ async function saveEditedUser(oldUsername){
         if(rec.username===oldUsername) rec.username = newUsername;
       });
     });
-    if(isSelf){ St.user = St.users[newUsername]; saveLoginSession(St.user, null); }
+    if(St.user && St.user.username===oldUsername){ St.user = St.users[newUsername]; saveLoginSession(newUsername); }
     await saveKey('exercises', St.exercises);
     await saveKey('sichtungen_index', St.sichtungen);
   }
+
   u.email = newEmail;
   u.role = newRole;
   u.locked = newLocked;
@@ -2312,78 +2154,6 @@ function exportExercisePdf(exId){
 }
 
 /* ====================== RENDER: LOGIN / REGISTER ====================== */
-function viewSetup(){
-  return `
-  <div class="wrap-narrow">
-    <div style="text-align:center;margin-bottom:26px;">
-      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> mSTaRT Sichtungstrainer</div>
-    </div>
-    <div class="card" style="border-left:5px solid var(--yellow);">
-      <div class="small" style="letter-spacing:.1em;text-transform:uppercase;color:var(--navy);font-weight:800;">🔧 Ersteinrichtung</div>
-      <h2 style="margin-top:6px;">Erstes Admin-Konto anlegen</h2>
-      <p class="small">Es existiert noch kein Benutzerkonto in diesem System. Lege jetzt dein eigenes
-        Administrator-Konto an — es gibt bewusst kein voreingestelltes Standard-Konto mehr.</p>
-      <div class="field"><label>Benutzername</label><input id="su-user"></div>
-      <div class="field"><label>Passwort</label><input id="su-pass" type="password" placeholder="Mindestens 6 Zeichen"></div>
-      <div class="field"><label>Passwort bestätigen</label><input id="su-pass2" type="password"></div>
-      <div class="field"><label>E-Mail</label><input id="su-mail" type="email"></div>
-      <button class="btn btn-primary" style="width:100%" onclick="submitSetup(
-        document.getElementById('su-user').value,
-        document.getElementById('su-pass').value,
-        document.getElementById('su-pass2').value,
-        document.getElementById('su-mail').value)">Admin-Konto anlegen</button>
-    </div>
-  </div>`;
-}
-async function submitSetup(username, password, password2, email){
-  username = (username||'').trim();
-  if(!username || !password){ toast('Bitte Benutzername und Passwort eingeben'); return; }
-  if(password.length<6){ toast('Passwort muss mindestens 6 Zeichen lang sein'); return; }
-  if(password !== password2){ toast('Passwörter stimmen nicht überein'); return; }
-
-  const apiResult = await callAuthApi({action:'bootstrapAdmin', username, password, email});
-  if(apiResult){
-    if(!apiResult.ok){ toast(apiResult.error||'Ersteinrichtung fehlgeschlagen'); return; }
-    St.user = apiResult.user;
-    St.users[apiResult.user.username] = apiResult.user;
-    St.authToken = apiResult.token;
-    saveLoginSession(apiResult.user, apiResult.token);
-    toast('Admin-Konto angelegt');
-    go('admin');
-    return;
-  }
-  // Fallback: keine Server-Funktion konfiguriert -> lokale Ersteinrichtung
-  if(Object.keys(St.users).length>0){ toast('Ersteinrichtung bereits abgeschlossen'); go('login'); return; }
-  const adminUser = {username, email:email||'', role:'admin', locked:false,
-    createdAt:nowStamp(), lastLogin:nowStamp(), emailVerified:true};
-  await setPasswordHash(adminUser, password);
-  St.users = { [username]: adminUser };
-  const ok = await saveKeyRetry('users', St.users);
-  if(!ok){ toast('Fehler: Admin-Konto konnte nicht gespeichert werden'); return; }
-  St.user = adminUser;
-  saveLoginSession(adminUser, null);
-  toast('Admin-Konto angelegt');
-  go('admin');
-}
-
-function viewRegisterPending(){
-  const username = St.pendingVerifyUsername || '';
-  return `
-  <div class="wrap-narrow">
-    <div style="text-align:center;margin-bottom:26px;">
-      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> Fast geschafft</div>
-    </div>
-    <div class="card">
-      <h2>📧 Bitte E-Mail-Adresse bestätigen</h2>
-      <p>Wir haben dir eine Bestätigungs-Mail geschickt. Bitte klicke auf den Link in dieser
-        E-Mail, um deine Registrierung abzuschließen — erst danach kannst du dich anmelden.</p>
-      <p class="small">Keine Mail erhalten? Prüfe auch deinen Spam-Ordner. Der Link ist 24 Stunden gültig.</p>
-      <button class="btn" style="width:100%" onclick="resendVerificationEmail('${username}')">Bestätigungs-Mail erneut senden</button>
-      <p style="text-align:center;margin-top:14px;"><a href="#" onclick="go('login');return false;" style="color:var(--blue);font-weight:700;">Zurück zur Anmeldung</a></p>
-    </div>
-  </div>`;
-}
-
 function viewLogin(){
   return `
   <div class="wrap-narrow">
@@ -2409,8 +2179,7 @@ function viewRegister(){
       <div class="field"><label>Benutzername</label><input id="re-user"></div>
       <div class="field"><label>Passwort</label><input id="re-pass" type="password"></div>
       <div class="field"><label>E-Mail</label><input id="re-mail" type="email"></div>
-      <p class="small">Nach der Registrierung erhältst du eine Bestätigungs-Mail — erst nach Klick auf den
-        Link darin ist dein Konto aktiv.</p>
+      <p class="small">Hinweis: E-Mail-Verifizierung ist in diesem Prototyp deaktiviert – dein Konto ist sofort nutzbar.</p>
       <button class="btn btn-primary" style="width:100%" onclick="doRegister(document.getElementById('re-user').value,document.getElementById('re-pass').value,document.getElementById('re-mail').value)">Registrieren</button>
       <p style="text-align:center;margin-top:14px;"><a href="#" onclick="go('login');return false;" style="color:var(--blue);font-weight:700;">Zurück zur Anmeldung</a></p>
     </div>
@@ -3077,25 +2846,6 @@ function openFreeEventModal(exId){
   render();
 }
 
-// Setzt eine Übung auf "Anfangszustand" zurück: löscht alle Sichtungsergebnisse und den
-// gesamten Zeitverlauf (Start/Pause/Ende, Schnelleinträge) sowie die bisherige Teilnehmerliste,
-// behält aber alle Einstellungen der Übung selbst (Name, Szenario, Ort/Datum/Uhrzeit/Wetter,
-// Modus, Patientenauswahl, Krankenhäuser, Briefing-Angaben). So können die nächsten Teilnehmer
-// dieselbe Übung unbelastet von Vorgänger-Daten neu durchlaufen.
-async function resetExercise(exId){
-  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
-  if(!confirm(`Übung "${ex.name}" wirklich zurücksetzen?\n\nAlle Sichtungsergebnisse und der komplette Zeitverlauf (Start/Pause/Ende, Schnelleinträge) werden UNWIDERRUFLICH gelöscht. Die Übung selbst mit allen Einstellungen bleibt erhalten.\n\nFortfahren?`)) return;
-  ex.status = 'entwurf';
-  ex.log = [];
-  ex.participants = {};
-  St.sichtungen[exId] = [];
-  const ok1 = await saveKeyRetry('exercises', St.exercises);
-  const ok2 = await saveKeyRetry('sichtungen_index', St.sichtungen);
-  if(!ok1 || !ok2){ toast('Fehler beim Zurücksetzen der Übung'); return; }
-  toast('Übung wurde zurückgesetzt – bereit für den nächsten Durchlauf');
-  render();
-}
-
 function viewCockpit(){
   const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
   if(!ex) return `<div class="wrap"><p>Keine Übung ausgewählt.</p></div>`;
@@ -3146,7 +2896,6 @@ function viewCockpit(){
       <button class="btn" onclick="St.currentExerciseId='${ex.id}';go('debriefing')">🧾 Debriefing</button>
       <button class="btn" onclick="exportExercisePdf('${ex.id}')">📄 PDF-Bericht erzeugen</button>
       <button class="btn" onclick="openExerciseEditModal('${ex.id}')">⚙ Übung bearbeiten</button>
-      <button class="btn btn-danger" onclick="resetExercise('${ex.id}')">🔄 Zurücksetzen</button>
     </div>
     <div class="card">
       <p>Gesichtete Patienten: <b>${list.filter(r=>r.kategorie).length}</b> von ${(ex.patientIds&&ex.patientIds.length)?ex.patientIds.length:St.patients.length}${ex.modus==='qr'?' (Planwert: '+(ex.patientCount||'-')+')':''}</p>
@@ -3162,7 +2911,7 @@ function viewCockpit(){
 function viewAdmin(){
   const tabs = ['patienten','nutzer','uebungen'];
   const tabLabels = {patienten:'Patientendatenbank', nutzer:'Nutzerübersicht', uebungen:'Übungen'};
-  const tabBar = tabs.map(t=>`<div class="tab ${St.adminTab===t?'active':''}" onclick="goAdminTab('${t}')">${tabLabels[t]}</div>`).join('');
+  const tabBar = tabs.map(t=>`<div class="tab ${St.adminTab===t?'active':''}" onclick="St.adminTab='${t}';render()">${tabLabels[t]}</div>`).join('');
   let content = '';
   if(St.adminTab==='patienten') content = adminPatients();
   if(St.adminTab==='nutzer') content = adminUsers();
@@ -3362,27 +3111,24 @@ async function collectAndSavePatient(pid){
 }
 
 function adminUsers(){
-  const rows = Object.values(St.users).map(u=>{
-    const isSelf = St.user && St.user.username===u.username;
-    return `
+  const rows = Object.values(St.users).map(u=>`
     <tr>
-      <td>${u.username}${isSelf?' <span class="small">(du)</span>':''}</td>
+      <td>${u.username}</td>
       <td>${u.email}</td>
       <td>${u.lastLogin||'nie'}</td>
       <td>
-        <select onchange="assignRole('${u.username}', this.value)" ${isSelf?'disabled':''}>
+        <select onchange="assignRole('${u.username}', this.value)" ${u.username==='Martin'?'disabled':''}>
           ${['teilnehmer','uebungsleiter','admin'].map(r=>`<option value="${r}" ${u.role===r?'selected':''}>${r}</option>`).join('')}
         </select>
       </td>
       <td>${u.locked?'<span class="tag tag-rot">gesperrt</span>':'<span class="tag tag-gruen">aktiv</span>'}</td>
       <td>
         <button class="btn btn-sm" onclick="openEditUserModal('${u.username}')">Ändern</button>
-        <button class="btn btn-sm" ${isSelf?'disabled':''} onclick="toggleLock('${u.username}')">${u.locked?'Entsperren':'Sperren'}</button>
+        <button class="btn btn-sm" onclick="toggleLock('${u.username}')">${u.locked?'Entsperren':'Sperren'}</button>
         <button class="btn btn-sm" onclick="openSetPasswordModal('${u.username}')">Passwort setzen</button>
-        ${!isSelf?`<button class="btn btn-sm btn-danger" onclick="deleteUser('${u.username}')">Löschen</button>`:''}
+        ${u.username!=='Martin'?`<button class="btn btn-sm btn-danger" onclick="deleteUser('${u.username}')">Löschen</button>`:''}
       </td>
-    </tr>`;
-  }).join('');
+    </tr>`).join('');
   return `
   <div class="card">
     <div class="flex-between">
@@ -3430,10 +3176,7 @@ function render(){
   const el = document.getElementById('app');
   let body = '';
   if(!St.user){
-    if(St.route==='setup') body = viewSetup();
-    else if(St.route==='register') body = viewRegister();
-    else if(St.route==='registerPending') body = viewRegisterPending();
-    else body = viewLogin();
+    body = St.route==='register' ? viewRegister() : viewLogin();
   }else{
     // Zusätzliche Absicherung: Admin-Bereich (inkl. KI-Patientengenerierung) ist
     // ausschließlich für die Rolle "admin" zugänglich, auch wenn St.route manuell
