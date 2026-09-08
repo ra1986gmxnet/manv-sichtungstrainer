@@ -319,18 +319,6 @@ function nowStamp(){ return new Date().toLocaleString('de-DE'); }
    Absicherung (siehe setPasswordHash/verifyPassword) zurück, damit Login/Registrierung immer
    funktionieren. E-Mail-Verifizierung ist NUR über die Server-Funktion möglich. */
 const AUTH_API = '/.netlify/functions/auth';
-const CERT_API = '/.netlify/functions/certificate';
-async function callCertificateApi(payload){
-  try{
-    const resp = await fetch(CERT_API, {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
-    });
-    return await resp.json();
-  }catch(e){
-    console.error('Zertifikat-API nicht erreichbar', e);
-    return { ok:false, error:'Server-Funktion für Zertifikate ist nicht erreichbar (noch nicht deployt/konfiguriert?).' };
-  }
-}
 async function callAuthApi(payload){
   try{
     const resp = await fetch(AUTH_API, {
@@ -3108,139 +3096,6 @@ async function resetExercise(exId){
   render();
 }
 
-// ====================== TEILNAHMEZERTIFIKATE (nur Übungsleiter/Admin) ======================
-function openCertificates(exId){
-  St.currentExerciseId = exId;
-  if(!St.certRows || !St.certRows.length){
-    St.certRows = [{id:uid(), name:'', vorname:'', email:''}];
-  }
-  go('certificates');
-}
-
-// Liest die aktuell im DOM eingegebenen Werte aller Teilnehmerzeilen zurück in den
-// Zustand, BEVOR eine strukturelle Änderung (Zeile hinzufügen/entfernen) einen
-// kompletten Re-Render auslöst — sonst würden bereits eingetippte, aber noch nicht
-// "synchronisierte" Werte in anderen Zeilen beim Neuzeichnen verloren gehen.
-function syncCertRowsFromDom(){
-  (St.certRows||[]).forEach(r=>{
-    const n = document.getElementById('cert-name-'+r.id);
-    const v = document.getElementById('cert-vorname-'+r.id);
-    const e = document.getElementById('cert-email-'+r.id);
-    if(n) r.name = n.value;
-    if(v) r.vorname = v.value;
-    if(e) r.email = e.value;
-  });
-}
-
-function duplicateCertRow(rowId){
-  syncCertRowsFromDom();
-  const idx = St.certRows.findIndex(r=>r.id===rowId);
-  if(idx===-1) return;
-  const src = St.certRows[idx];
-  const copy = {id:uid(), name:src.name, vorname:src.vorname, email:src.email};
-  St.certRows.splice(idx+1, 0, copy);
-  render();
-}
-function removeCertRow(rowId){
-  syncCertRowsFromDom();
-  if(St.certRows.length<=1){ toast('Mindestens eine Teilnehmerzeile muss bestehen bleiben'); return; }
-  St.certRows = St.certRows.filter(r=>r.id!==rowId);
-  render();
-}
-
-function getCertFormValues(){
-  const getVal = id => { const el=document.getElementById(id); return el ? el.value.trim() : ''; };
-  return {
-    uebungstag: getVal('cf-tag'), uebungsleiter: getVal('cf-leiter'),
-    thema: getVal('cf-thema'), ue: getVal('cf-ue'), ort: getVal('cf-ort')
-  };
-}
-
-async function issueCertificate(rowId, mode){
-  syncCertRowsFromDom();
-  const row = St.certRows.find(r=>r.id===rowId); if(!row) return;
-  if(!row.name.trim() || !row.vorname.trim()){ toast('Bitte Name und Vorname des Teilnehmers angeben'); return; }
-  const form = getCertFormValues();
-  if(!form.uebungstag || !form.uebungsleiter || !form.thema || !form.ue || !form.ort){
-    toast('Bitte zuerst alle Felder oben im Formular ausfüllen'); return;
-  }
-  if(mode==='email' && !row.email.trim()){ toast('Bitte E-Mail-Adresse des Teilnehmers angeben'); return; }
-
-  const payload = { token: St.authToken, mode: mode==='email' ? 'email' : 'download',
-    name: row.name.trim(), vorname: row.vorname.trim(), email: row.email.trim(), ...form };
-
-  toast(mode==='email' ? 'Sende Zertifikat…' : 'Erzeuge Zertifikat…');
-  const r = await callCertificateApi(payload);
-  if(!r || !r.ok){ toast((r && r.error) || 'Fehler bei der Zertifikat-Erstellung'); return; }
-
-  if(mode==='email'){
-    toast('Zertifikat wurde an '+row.email+' gesendet');
-  }else{
-    // Base64-PDF in einen Blob umwandeln und in neuem Tab zum Ansehen/Drucken öffnen
-    try{
-      const byteChars = atob(r.pdfBase64);
-      const byteNumbers = new Array(byteChars.length);
-      for(let i=0;i<byteChars.length;i++) byteNumbers[i] = byteChars.charCodeAt(i);
-      const blob = new Blob([new Uint8Array(byteNumbers)], {type:'application/pdf'});
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
-      toast('Zertifikat erzeugt – Druckdialog im PDF-Tab öffnen');
-    }catch(e){
-      toast('Fehler beim Öffnen des PDFs: '+e.message);
-    }
-  }
-}
-
-function viewCertificates(){
-  const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
-  if(!St.certRows || !St.certRows.length){ St.certRows = [{id:uid(), name:'', vorname:'', email:''}]; }
-  const defaultThema = (ex && (ex.einsatzstichwort || ex.scenario)) || 'ManV Sichtungsübung nach mSTaRT';
-  const defaultTag = (ex && ex.datum) || '';
-  const defaultOrt = (ex && ex.ort) || '';
-  const defaultLeiter = (St.user && St.user.username) || '';
-
-  const rows = St.certRows.map(r=>`
-    <tr>
-      <td><input id="cert-name-${r.id}" value="${(r.name||'').replace(/"/g,'&quot;')}" placeholder="Nachname"></td>
-      <td><input id="cert-vorname-${r.id}" value="${(r.vorname||'').replace(/"/g,'&quot;')}" placeholder="Vorname"></td>
-      <td><input id="cert-email-${r.id}" type="email" value="${(r.email||'').replace(/"/g,'&quot;')}" placeholder="E-Mail (für Versand)"></td>
-      <td style="white-space:nowrap;">
-        <button class="btn btn-sm btn-primary" onclick="issueCertificate('${r.id}','email')">📧 Per E-Mail</button>
-        <button class="btn btn-sm" onclick="issueCertificate('${r.id}','print')">🖨 Ausgedruckt</button>
-        <button class="btn btn-sm" onclick="duplicateCertRow('${r.id}')">+ Nächster Teilnehmer</button>
-        <button class="btn btn-sm btn-danger" onclick="removeCertRow('${r.id}')">✕</button>
-      </td>
-    </tr>`).join('');
-
-  return `
-  <div class="wrap">
-    <button class="btn" onclick="go('cockpit')">← Zurück zum Cockpit</button>
-    <div class="card" style="margin-top:14px;border-left:5px solid var(--yellow);">
-      <div class="small" style="letter-spacing:.12em;text-transform:uppercase;color:var(--navy);font-weight:800;">🎓 Teilnahmezertifikate</div>
-      <h1 style="margin-top:4px;">${ex ? ex.name : ''}</h1>
-      <p class="small">Diese Angaben gelten für ALLE unten erzeugten Zertifikate dieser Sitzung.</p>
-
-      <div class="row">
-        <div class="field"><label>Übungstag</label><input id="cf-tag" type="date" value="${defaultTag}"></div>
-        <div class="field"><label>Übungsleiter/in</label><input id="cf-leiter" value="${defaultLeiter}"></div>
-      </div>
-      <div class="field"><label>Thema der Übung</label><input id="cf-thema" value="${defaultThema.replace(/"/g,'&quot;')}"></div>
-      <div class="row">
-        <div class="field"><label>Unterrichtseinheiten</label><input id="cf-ue" placeholder="z.B. 4" value="4"></div>
-        <div class="field"><label>Übungsort</label><input id="cf-ort" value="${defaultOrt.replace(/"/g,'&quot;')}"></div>
-      </div>
-
-      <div class="section-title">Teilnehmer</div>
-      <table><thead><tr><th>Name</th><th>Vorname</th><th>E-Mail</th><th></th></tr></thead>
-      <tbody>${rows}</tbody></table>
-
-      <p class="small">"Per E-Mail" sendet das fertige PDF direkt an die angegebene Adresse (erfordert eingerichteten
-        Mailversand, siehe DEPLOYMENT.md). "Ausgedruckt" öffnet das PDF in einem neuen Tab zum Ansehen/Drucken/Speichern.
-        Das Zertifikat enthält unten Ort/Datum sowie eine Unterschriftslinie für den Übungsleiter zum eigenhändigen Unterschreiben.</p>
-    </div>
-  </div>`;
-}
-
 function viewCockpit(){
   const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
   if(!ex) return `<div class="wrap"><p>Keine Übung ausgewählt.</p></div>`;
@@ -3292,7 +3147,6 @@ function viewCockpit(){
       <button class="btn" onclick="exportExercisePdf('${ex.id}')">📄 PDF-Bericht erzeugen</button>
       <button class="btn" onclick="openExerciseEditModal('${ex.id}')">⚙ Übung bearbeiten</button>
       <button class="btn btn-danger" onclick="resetExercise('${ex.id}')">🔄 Zurücksetzen</button>
-      <button class="btn" onclick="openCertificates('${ex.id}')">🎓 Zertifikate</button>
     </div>
     <div class="card">
       <p>Gesichtete Patienten: <b>${list.filter(r=>r.kategorie).length}</b> von ${(ex.patientIds&&ex.patientIds.length)?ex.patientIds.length:St.patients.length}${ex.modus==='qr'?' (Planwert: '+(ex.patientCount||'-')+')':''}</p>
@@ -3599,7 +3453,6 @@ function render(){
     else if(St.route==='cockpit') body += viewCockpit();
     else if(St.route==='briefing') body += viewTrainerBriefing();
     else if(St.route==='debriefing') body += viewDebriefing();
-    else if(St.route==='certificates') body += viewCertificates();
     else if(St.route==='admin') body += viewAdmin();
     else body += viewExercises();
   }
