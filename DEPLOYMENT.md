@@ -221,6 +221,85 @@ Admin-Aktionen, korrektes Passwort für den Login).
 
 ---
 
+## Ersteinrichtung: Es gibt kein Standard-Konto mehr
+
+Frühere Versionen legten automatisch ein Konto "Martin" mit Passwort "1234" an.
+Das gibt es jetzt bewusst NICHT mehr — kein Zugangsdaten-Paar steht irgendwo im
+Quelltext. Stattdessen zeigt die App bei der allerersten Nutzung automatisch einen
+Ersteinrichtungs-Bildschirm ("🔧 Ersteinrichtung"), auf dem du selbst dein erstes
+Admin-Konto (eigener Benutzername, eigenes Passwort, eigene E-Mail) anlegst. Das
+funktioniert unabhängig davon, ob die Server-Funktion (siehe oben) schon
+eingerichtet ist oder nicht.
+
+**Falls dein Projekt schon vorher mit dem alten Konto "Martin"/"1234" lief:**
+Dieses Konto existiert in deiner Datenbank weiterhin, bis du es änderst — der
+Codewechsel allein löscht keine bereits gespeicherten Daten. Bitte einmalig:
+1. Mit Martin/1234 ein letztes Mal einloggen.
+2. Im Admin-Bereich → Nutzerübersicht → bei Martin auf "Ändern" klicken und
+   Benutzernamen sowie E-Mail auf deine eigenen Werte ändern.
+3. Über "Passwort setzen" sofort ein neues, sicheres Passwort vergeben.
+
+---
+
+## Optional (empfohlen): Echte E-Mail-Verifizierung bei der Registrierung
+
+Ohne diesen Schritt werden neu registrierte Konten sofort aktiv (wie bisher) — die
+Verifizierungspflicht wird automatisch übersprungen, wenn kein Mailversand
+konfiguriert ist. Mit diesem Schritt bekommt jeder neue Teilnehmer nach der
+Registrierung eine Bestätigungs-Mail und muss erst auf den enthaltenen Link
+klicken, bevor er sich einloggen kann.
+
+**Voraussetzung:** Ein Gmail-Konto (ein bereits vorhandenes reicht, es wird kein
+neues Konto bei einem Drittanbieter benötigt).
+
+**Schritt 1: App-Passwort für Gmail erzeugen**
+1. Für das Gmail-Konto muss die 2-Faktor-Authentifizierung aktiviert sein
+   (Google-Konto → Sicherheit → "Bestätigung in zwei Schritten").
+2. Danach unter Google-Konto → Sicherheit → "App-Passwörter" ein neues
+   App-Passwort erzeugen (z.B. Name "Sichtungstrainer"). Google zeigt ein
+   16-stelliges Passwort — das ist NICHT dein normales Gmail-Passwort.
+
+**Schritt 2: Umgebungsvariablen in Netlify setzen**
+1. Netlify-Dashboard → "Site configuration" → "Environment variables".
+2. `GMAIL_USER` = deine vollständige Gmail-Adresse.
+3. `GMAIL_APP_PASSWORD` = das eben erzeugte 16-stellige App-Passwort.
+4. Speichern und neu deployen.
+
+**Schritt 3: Testen**
+1. Auf der Live-Seite einen Test-Account registrieren.
+2. Es sollte innerhalb weniger Sekunden eine Bestätigungs-Mail ankommen (ggf.
+   Spam-Ordner prüfen). Erst nach Klick auf den Link darin ist ein Login möglich.
+3. Kommt keine Mail an: den Fehlertext beachten, der beim Registrieren angezeigt
+   wird (z.B. falsches App-Passwort), und Schritt 1/2 erneut prüfen.
+
+Ohne diese Einrichtung funktioniert die Registrierung weiterhin ganz normal, nur
+eben ohne echten Bestätigungs-Schritt.
+
+**Zusatz-Funktion (automatisch aktiv, sobald Gmail eingerichtet ist):** Jedes
+Admin-Konto mit hinterlegter E-Mail-Adresse bekommt bei jeder neuen Registrierung
+automatisch eine kurze Benachrichtigungs-Mail (Benutzername, E-Mail, Zeitpunkt,
+Status der Verifizierung) — keine weitere Einrichtung nötig. Ohne konfigurierten
+Mailversand entfällt auch diese Benachrichtigung.
+
+---
+
+## Teilnahmezertifikate (Übungsleiter/Admin, im Cockpit)
+
+Im Übungsleiter-Cockpit gibt es den Button "🎓 Zertifikate". Dort lassen sich für
+beliebig viele Teilnehmer optisch gestaltete PDF-Zertifikate erzeugen (Siegel,
+Rahmen, Unterschriftslinie) — pro Teilnehmer wahlweise direkt per E-Mail versendet
+oder als PDF zum Ausdrucken in einem neuen Tab geöffnet.
+
+- Für "🖨 Ausgedruckt" ist **keine** zusätzliche Einrichtung nötig — funktioniert
+  sofort, sobald `SESSION_SECRET` gesetzt ist (siehe oben, "Maximale Sicherheit").
+- Für "📧 Per E-Mail" wird derselbe Gmail-Versand genutzt wie für die
+  Registrierungs-Bestätigung — dafür müssen `GMAIL_USER`/`GMAIL_APP_PASSWORD`
+  gesetzt sein (siehe Abschnitt "Echte E-Mail-Verifizierung" oben).
+- Die Bibliothek `pdfkit` für die PDF-Erstellung wird automatisch über
+  `package.json` mitinstalliert — keine weitere Aktion nötig.
+
+---
+
 Bei Fragen oder wenn ein Schritt nicht funktioniert: den genauen Fehlertext
 (z.B. aus der Browser-Konsole oder dem roten Fehlerkasten im Admin-Bereich)
 notieren — damit lässt sich die Ursache gezielt eingrenzen.

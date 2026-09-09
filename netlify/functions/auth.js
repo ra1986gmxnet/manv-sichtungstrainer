@@ -8,6 +8,9 @@
 //   Sitzungs-Token zurück (kein Passwort, kein Passwort-Hash).
 // - Admin-Aktionen (Nutzer anlegen/ändern/löschen/Passwort setzen/Rolle ändern)
 //   erfordern dieses gültige Admin-Token; das Token wird serverseitig geprüft.
+// - Bei jeder neuen Registrierung erhalten alle Admin-Konten mit hinterlegter
+//   E-Mail-Adresse automatisch eine Benachrichtigungs-Mail (nur wenn GMAIL_USER/
+//   GMAIL_APP_PASSWORD gesetzt sind).
 // - Die Firestore-Regeln (firestore.rules) sperren das Dokument "appdata/users"
 //   für JEDEN direkten Zugriff aus dem Browser — nur diese Funktion (mit dem
 //   privaten Service-Account-Schlüssel) darf es lesen/schreiben.
@@ -18,6 +21,7 @@
 
 const crypto = require("crypto");
 const admin = require("firebase-admin");
+const nodemailer = require("nodemailer");
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -68,6 +72,28 @@ function verifyToken(token, secret) {
   return payload;
 }
 
+// ---- E-Mail-Versand (Gmail SMTP über nodemailer). Optional: ohne GMAIL_USER/
+// GMAIL_APP_PASSWORD wird die Verifizierungspflicht automatisch übersprungen,
+// damit die App auch ohne konfigurierten Mailversand nutzbar bleibt. ----
+const EMAIL_CONFIGURED = !!(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
+let mailTransporter = null;
+function getTransporter() {
+  if (!EMAIL_CONFIGURED) return null;
+  if (!mailTransporter) {
+    mailTransporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD }
+    });
+  }
+  return mailTransporter;
+}
+async function sendMail(to, subject, html) {
+  const t = getTransporter();
+  if (!t) return false;
+  await t.sendMail({ from: `"mSTaRT Sichtungstrainer" <${process.env.GMAIL_USER}>`, to, subject, html });
+  return true;
+}
+
 async function loadUsers() {
   const doc = await db.collection("appdata").doc("users").get();
   return doc.exists ? JSON.parse(doc.data().value) : {};
@@ -76,7 +102,7 @@ async function saveUsers(users) {
   await db.collection("appdata").doc("users").set({ value: JSON.stringify(users), updatedAt: Date.now() });
 }
 function stripSecret(u) {
-  const { password, passwordHash, passwordSalt, ...rest } = u;
+  const { password, passwordHash, passwordSalt, verifyToken: vt, ...rest } = u;
   return rest;
 }
 
@@ -96,14 +122,27 @@ exports.handler = async function (event) {
   try {
     let users = await loadUsers();
 
-    // Einmalige Ersteinrichtung: falls noch nie ein Nutzer existiert hat, Standard-Admin anlegen.
-    if (!users || Object.keys(users).length === 0) {
-      const { salt, hash } = hashPassword("1234");
-      users = {
-        Martin: { username: "Martin", email: "admin@example.org", role: "admin", locked: false,
-          createdAt: nowStamp(), lastLogin: null, passwordSalt: salt, passwordHash: hash }
-      };
+    // ---------------- ERSTEINRICHTUNG (ersetzt den früheren, fest im Quelltext
+    // hinterlegten Standard-Admin "Martin/1234" — es gibt jetzt KEIN Konto mehr,
+    // dessen Zugangsdaten irgendwo im Quelltext stehen) ----------------
+    if (payload.action === "checkSetup") {
+      return resp({ ok: true, needsSetup: Object.keys(users).length === 0 });
+    }
+    if (payload.action === "bootstrapAdmin") {
+      if (Object.keys(users).length > 0) {
+        return resp({ ok: false, error: "Ersteinrichtung bereits abgeschlossen." });
+      }
+      const { username, password, email } = payload;
+      if (!username || !password || password.length < 6) {
+        return resp({ ok: false, error: "Benutzername und ein Passwort mit mind. 6 Zeichen erforderlich" });
+      }
+      const { salt, hash } = hashPassword(password);
+      users[username] = { username, email: email || "", role: "admin", locked: false,
+        createdAt: nowStamp(), lastLogin: nowStamp(), passwordSalt: salt, passwordHash: hash,
+        emailVerified: true }; // Ersteinrichtung durch die Person mit Server-/Hosting-Zugriff, keine Mail-Verifizierung nötig
       await saveUsers(users);
+      const token = signToken({ username, role: "admin", exp: Date.now() + 12 * 3600 * 1000 }, SECRET);
+      return resp({ ok: true, user: stripSecret(users[username]), token });
     }
 
     // ---------------- LOGIN ----------------
@@ -129,23 +168,99 @@ exports.handler = async function (event) {
       }
       if (!valid) return resp({ ok: false, error: "Passwort falsch" });
 
+      // E-Mail-Verifizierung: nur blockieren, wenn explizit auf false gesetzt (neue,
+      // noch unbestätigte Konten). Alt-Konten ohne dieses Feld bleiben nutzbar.
+      if (u.emailVerified === false) {
+        return resp({ ok: false, error: "Bitte bestätige zuerst deine E-Mail-Adresse (Link in der Bestätigungs-Mail). Keine Mail erhalten? Auf der Anmeldeseite erneut anfordern." });
+      }
+
       u.lastLogin = nowStamp();
       await saveUsers(users);
       const token = signToken({ username: u.username, role: u.role, exp: Date.now() + 12 * 3600 * 1000 }, SECRET);
       return resp({ ok: true, user: stripSecret(u), token });
     }
 
-    // ---------------- REGISTRIERUNG (öffentlich, wie bisher) ----------------
+    // ---------------- REGISTRIERUNG (öffentlich) ----------------
     if (payload.action === "register") {
       const { username, password, email } = payload;
       if (!username || !password || password.length < 3) {
         return resp({ ok: false, error: "Benutzername und ein Passwort mit mind. 3 Zeichen erforderlich" });
       }
+      if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+        return resp({ ok: false, error: "Bitte eine gültige E-Mail-Adresse angeben" });
+      }
       if (users[username]) return resp({ ok: false, error: "Benutzername bereits vergeben" });
       const { salt, hash } = hashPassword(password);
-      users[username] = { username, email: email || "", role: "teilnehmer", locked: false,
+      const newUser = { username, email, role: "teilnehmer", locked: false,
         createdAt: nowStamp(), lastLogin: null, passwordSalt: salt, passwordHash: hash };
+
+      // Benachrichtigt alle Admin-Konten mit hinterlegter E-Mail-Adresse über die neue
+      // Registrierung. Läuft über denselben Gmail-Versand wie die Verifizierungs-Mail;
+      // ohne konfigurierten Mailversand (EMAIL_CONFIGURED=false) passiert hier nichts,
+      // die Registrierung selbst wird davon nie beeinträchtigt (Fehler werden nur geloggt).
+      async function notifyAdminsOfNewRegistration(verificationPending) {
+        if (!EMAIL_CONFIGURED) return;
+        const adminEmails = Object.values(users)
+          .filter(u => u.role === "admin" && u.email)
+          .map(u => u.email);
+        if (!adminEmails.length) return;
+        const statusLine = verificationPending
+          ? "Der Nutzer muss seine E-Mail-Adresse noch bestätigen, bevor er sich einloggen kann."
+          : "Das Konto ist sofort aktiv (keine E-Mail-Verifizierung konfiguriert).";
+        try {
+          await sendMail(adminEmails.join(","), `Neue Registrierung: ${username}`,
+            `<p>Ein neuer Nutzer hat sich im mSTaRT Sichtungstrainer registriert:</p>
+             <ul><li>Benutzername: ${username}</li><li>E-Mail: ${email}</li><li>Zeitpunkt: ${nowStamp()}</li></ul>
+             <p>${statusLine}</p>`);
+        } catch (mailErr) {
+          console.error("Admin-Benachrichtigung fehlgeschlagen:", mailErr.message);
+        }
+      }
+
+      if (EMAIL_CONFIGURED) {
+        const token = crypto.randomBytes(24).toString("hex");
+        newUser.emailVerified = false;
+        newUser.verifyToken = token;
+        newUser.verifyTokenExpires = Date.now() + 24 * 3600 * 1000;
+        users[username] = newUser;
+        await saveUsers(users);
+        await notifyAdminsOfNewRegistration(true);
+        const link = `https://${event.headers.host}/.netlify/functions/verify-email?token=${token}`;
+        try {
+          await sendMail(email, "Bitte E-Mail-Adresse bestätigen",
+            `<p>Hallo ${username},</p><p>bitte bestätige deine E-Mail-Adresse für den mSTaRT Sichtungstrainer, indem du auf den folgenden Link klickst:</p><p><a href="${link}">${link}</a></p><p>Der Link ist 24 Stunden gültig.</p>`);
+        } catch (mailErr) {
+          // Konto bleibt angelegt, aber unverifiziert -> Nutzer kann "erneut senden" versuchen
+          return resp({ ok: true, emailSent: false, mailError: mailErr.message });
+        }
+        return resp({ ok: true, emailSent: true });
+      } else {
+        // Kein Mailversand konfiguriert: Verifizierung überspringen, Konto sofort aktiv (wie zuvor)
+        newUser.emailVerified = true;
+        users[username] = newUser;
+        await saveUsers(users);
+        return resp({ ok: true, emailSent: false });
+      }
+    }
+
+    // ---------------- VERIFIZIERUNGS-MAIL ERNEUT SENDEN ----------------
+    if (payload.action === "resendVerification") {
+      const { username } = payload;
+      const u = users[username];
+      if (!u) return resp({ ok: false, error: "Benutzer nicht gefunden" });
+      if (u.emailVerified !== false) return resp({ ok: false, error: "Diese E-Mail-Adresse ist bereits bestätigt." });
+      if (!EMAIL_CONFIGURED) return resp({ ok: false, error: "Mailversand ist serverseitig nicht konfiguriert." });
+      const token = crypto.randomBytes(24).toString("hex");
+      u.verifyToken = token;
+      u.verifyTokenExpires = Date.now() + 24 * 3600 * 1000;
       await saveUsers(users);
+      const link = `https://${event.headers.host}/.netlify/functions/verify-email?token=${token}`;
+      try {
+        await sendMail(u.email, "Bitte E-Mail-Adresse bestätigen",
+          `<p>Hallo ${u.username},</p><p>hier ist dein neuer Bestätigungslink:</p><p><a href="${link}">${link}</a></p><p>Der Link ist 24 Stunden gültig.</p>`);
+      } catch (mailErr) {
+        return resp({ ok: false, error: "Mail konnte nicht gesendet werden: " + mailErr.message });
+      }
       return resp({ ok: true });
     }
 
@@ -172,7 +287,8 @@ exports.handler = async function (event) {
         if (users[p.username]) return resp({ ok: false, error: "Benutzername bereits vergeben" });
         const { salt, hash } = hashPassword(p.password);
         users[p.username] = { username: p.username, email: p.email || "", role: p.role || "teilnehmer",
-          locked: false, createdAt: nowStamp(), lastLogin: null, passwordSalt: salt, passwordHash: hash };
+          locked: false, createdAt: nowStamp(), lastLogin: null, passwordSalt: salt, passwordHash: hash,
+          emailVerified: true }; // vom Admin direkt angelegt -> keine Mail-Verifizierung nötig
         await saveUsers(users);
         return resp({ ok: true });
       }
@@ -182,7 +298,6 @@ exports.handler = async function (event) {
         if (!u) return resp({ ok: false, error: "Nutzer nicht gefunden" });
         let finalUsername = p.oldUsername;
         if (p.newUsername && p.newUsername !== p.oldUsername) {
-          if (p.oldUsername === "Martin") return resp({ ok: false, error: "Der Benutzername von Martin kann nicht geändert werden" });
           if (users[p.newUsername]) return resp({ ok: false, error: "Dieser Benutzername ist bereits vergeben" });
           delete users[p.oldUsername];
           u.username = p.newUsername;
@@ -190,7 +305,7 @@ exports.handler = async function (event) {
           finalUsername = p.newUsername;
         }
         if (p.email !== undefined) u.email = p.email;
-        if (p.role !== undefined && p.oldUsername !== "Martin") u.role = p.role;
+        if (p.role !== undefined) u.role = p.role;
         if (p.locked !== undefined) u.locked = p.locked;
         await saveUsers(users);
         return resp({ ok: true, finalUsername });
@@ -209,7 +324,6 @@ exports.handler = async function (event) {
       }
 
       if (op === "deleteUser") {
-        if (p.username === "Martin") return resp({ ok: false, error: "Admin Martin kann nicht gelöscht werden" });
         delete users[p.username];
         await saveUsers(users);
         return resp({ ok: true });
@@ -226,7 +340,6 @@ exports.handler = async function (event) {
       if (op === "assignRole") {
         const u = users[p.username];
         if (!u) return resp({ ok: false, error: "Nutzer nicht gefunden" });
-        if (p.username === "Martin") return resp({ ok: false, error: "Die Rolle von Martin kann nicht geändert werden" });
         u.role = p.role;
         await saveUsers(users);
         return resp({ ok: true });

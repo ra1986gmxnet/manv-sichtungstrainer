@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -343,14 +342,24 @@ function nowStamp(){ return new Date().toLocaleString('de-DE'); }
 const AUTH_API = '/.netlify/functions/auth';
 const CERT_API = '/.netlify/functions/certificate';
 async function callCertificateApi(payload){
+  let httpStatus = null, rawText = '';
   try{
     const resp = await fetch(CERT_API, {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
     });
-    return await resp.json();
+    httpStatus = resp.status;
+    rawText = await resp.text();
+    try{
+      return JSON.parse(rawText);
+    }catch(parseErr){
+      // Die Funktion hat geantwortet, aber kein gültiges JSON zurückgegeben — meist ein Zeichen
+      // dafür, dass die Funktion selbst nicht existiert (404) oder beim Start abgestürzt ist (502).
+      console.error('Zertifikat-API: ungültige Antwort', httpStatus, rawText.slice(0,500));
+      return { ok:false, error:`Server-Funktion antwortete unerwartet (HTTP ${httpStatus}). ${httpStatus===404?'Die Funktion "certificate" wurde auf dem Server nicht gefunden — ist netlify/functions/certificate.js im Repo enthalten und deployt?':'Rohantwort: '+rawText.slice(0,200)}` };
+    }
   }catch(e){
     console.error('Zertifikat-API nicht erreichbar', e);
-    return { ok:false, error:'Server-Funktion für Zertifikate ist nicht erreichbar (noch nicht deployt/konfiguriert?).' };
+    return { ok:false, error:'Server-Funktion für Zertifikate ist nicht erreichbar (Netzwerkfehler). Technisches Detail: '+e.message };
   }
 }
 async function callAuthApi(payload){
