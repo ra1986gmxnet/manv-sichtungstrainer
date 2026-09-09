@@ -367,7 +367,17 @@ async function callAuthApi(payload){
     const resp = await fetch(AUTH_API, {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
     });
-    const data = await resp.json();
+    const rawText = await resp.text();
+    let data;
+    try{
+      data = JSON.parse(rawText);
+    }catch(parseErr){
+      // Die Funktion hat geantwortet, aber kein gültiges JSON zurückgegeben — meist ein
+      // Zeichen dafür, dass die Funktion beim Start abgestürzt ist (z.B. fehlerhafte
+      // FIREBASE_SERVICE_ACCOUNT_JSON) oder gar nicht existiert (404).
+      console.error('Auth-API: ungültige Antwort', resp.status, rawText.slice(0,500));
+      return { ok:false, error:`Server-Funktion antwortete unerwartet (HTTP ${resp.status}). ${resp.status===404?'Die Funktion "auth" wurde nicht gefunden — ist netlify/functions/auth.js deployt?':'Rohantwort: '+rawText.slice(0,200)}` };
+    }
     if(data && data.ok===false && /Server nicht konfiguriert/i.test(data.error||'')){
       return null; // Signal: Fallback auf lokale Absicherung nutzen
     }
@@ -1488,7 +1498,7 @@ async function doLogin(username, password){
   if(!username || !password){ toast('Bitte Benutzername und Passwort eingeben'); return; }
   const apiResult = await callAuthApi({action:'login', username, password});
   if(apiResult){
-    if(!apiResult.ok){ toast(apiResult.error||'Anmeldung fehlgeschlagen'); return; }
+    if(!apiResult.ok){ toast(apiResult.error||('Anmeldung fehlgeschlagen (unerwartete Antwort: '+JSON.stringify(apiResult).slice(0,150)+')')); return; }
     St.user = apiResult.user;
     St.users[apiResult.user.username] = apiResult.user;
     St.authToken = apiResult.token;
@@ -1515,7 +1525,7 @@ async function doRegister(username, password, email){
   if(!username || !password || !email){ toast('Bitte alle Felder ausfüllen'); return; }
   const apiResult = await callAuthApi({action:'register', username, password, email});
   if(apiResult){
-    if(!apiResult.ok){ toast(apiResult.error||'Registrierung fehlgeschlagen'); return; }
+    if(!apiResult.ok){ toast(apiResult.error||('Registrierung fehlgeschlagen (unerwartete Antwort: '+JSON.stringify(apiResult).slice(0,150)+')')); return; }
     if(apiResult.emailSent){
       St.pendingVerifyUsername = username;
       go('registerPending');
@@ -2394,7 +2404,7 @@ async function submitSetup(username, password, password2, email){
 
   const apiResult = await callAuthApi({action:'bootstrapAdmin', username, password, email});
   if(apiResult){
-    if(!apiResult.ok){ toast(apiResult.error||'Ersteinrichtung fehlgeschlagen'); return; }
+    if(!apiResult.ok){ toast(apiResult.error||('Ersteinrichtung fehlgeschlagen (unerwartete Antwort: '+JSON.stringify(apiResult).slice(0,150)+')')); return; }
     St.user = apiResult.user;
     St.users[apiResult.user.username] = apiResult.user;
     St.authToken = apiResult.token;
