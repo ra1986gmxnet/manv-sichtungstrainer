@@ -23,12 +23,23 @@ const crypto = require("crypto");
 const admin = require("firebase-admin");
 const nodemailer = require("nodemailer");
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "{}"))
-  });
+// Wird die Initialisierung NICHT abgesichert und FIREBASE_SERVICE_ACCOUNT_JSON ist
+// ungültig, stürzt die gesamte Funktion mit einem kryptischen Laufzeitfehler ab
+// (Runtime.UserCodeSyntaxError), noch bevor überhaupt eine JSON-Antwort möglich ist.
+// Deshalb wird der Fehler hier abgefangen und weiter unten als klare, verständliche
+// Fehlermeldung an den Client zurückgegeben.
+let FIREBASE_INIT_ERROR = null;
+let db = null;
+try {
+  if (!admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "{}"))
+    });
+  }
+  db = admin.firestore();
+} catch (e) {
+  FIREBASE_INIT_ERROR = e.message;
 }
-const db = admin.firestore();
 
 const headers = {
   "Access-Control-Allow-Origin": "*",
@@ -113,6 +124,9 @@ exports.handler = async function (event) {
   const SECRET = process.env.SESSION_SECRET;
   if (!process.env.FIREBASE_SERVICE_ACCOUNT_JSON || !SECRET) {
     return resp({ ok: false, error: "Server nicht konfiguriert: FIREBASE_SERVICE_ACCOUNT_JSON und/oder SESSION_SECRET fehlen in den Netlify-Umgebungsvariablen (siehe DEPLOYMENT.md)." });
+  }
+  if (FIREBASE_INIT_ERROR) {
+    return resp({ ok: false, error: "FIREBASE_SERVICE_ACCOUNT_JSON ist ungültig (kein korrektes JSON): " + FIREBASE_INIT_ERROR + " — bitte in den Netlify-Umgebungsvariablen den KOMPLETTEN Inhalt der von Firebase heruntergeladenen JSON-Datei erneut einfügen (muss mit { beginnen und mit } enden, ohne zusätzlichen Text davor/danach)." });
   }
 
   let payload;
