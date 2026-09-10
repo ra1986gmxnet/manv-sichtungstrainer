@@ -15,13 +15,11 @@
 // eingerichtet wurden (siehe DEPLOYMENT.md). Ohne diese ist nur "Ausdrucken/
 // Herunterladen" möglich, kein E-Mail-Versand.
 //
-// Für das Siegel wird ein mitgeliefertes Bild genutzt (netlify/functions/images/
-// Siegel.png), kreisförmig zugeschnitten. Fehlt die Datei ausnahmsweise, greift
-// automatisch eine einfache Vektor-Ersatzgrafik. Für die handschriftlich wirkende
-// Unterschrift wird eine mitgelieferte Schreibschrift-Schriftart genutzt
-// (netlify/functions/fonts/Signature.ttf). WICHTIG: Bild- UND Schriftordner
-// müssen zusammen mit netlify.toml (included_files) deployt werden, sonst schlägt
-// die PDF-Erstellung fehl.
+// Für das Siegel und die Unterschrift werden mitgelieferte Bilder genutzt
+// (netlify/functions/images/Siegel.png bzw. Unterschrift.jpg). Fehlt eine Datei
+// ausnahmsweise, greift jeweils ein einfacher Text-Fallback. WICHTIG: der
+// gesamte Bilderordner muss zusammen mit netlify.toml (included_files) deployt
+// werden, sonst schlägt die PDF-Erstellung fehl.
 // ============================================================================
 
 const crypto = require("crypto");
@@ -64,7 +62,7 @@ function getTransporter() {
   return mailTransporter;
 }
 
-// ---- Datum als TT.MMMM.JJJJ (z.B. "05.September.2026") ----
+// ---- Datum als "TT. MMMM JJJJ" (z.B. "05. September 2026") ----
 const MONATE_DE = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
 function formatDateLangDE(input) {
   if (!input) return "";
@@ -75,7 +73,7 @@ function formatDateLangDE(input) {
   else if (de) d = new Date(Number(de[3]), Number(de[2]) - 1, Number(de[1]));
   if (!d || isNaN(d.getTime())) return input; // unbekanntes Format -> unverändert übernehmen
   const tag = String(d.getDate()).padStart(2, "0");
-  return `${tag}.${MONATE_DE[d.getMonth()]}.${d.getFullYear()}`;
+  return `${tag}. ${MONATE_DE[d.getMonth()]} ${d.getFullYear()}`;
 }
 
 // ---- Siegel: eingebettetes, vom Nutzer geliefertes Bild (kreisförmig zugeschnitten) ----
@@ -125,10 +123,6 @@ function buildCertificatePdfBuffer(data) {
     const W = doc.page.width, H = doc.page.height;
     const navy = "#123A63", red = "#E2231A", gold = "#C9A227", ink = "#1B2A41", paper = "#FEFCF6";
 
-    try {
-      doc.registerFont("Signature", path.join(__dirname, "fonts", "Signature.ttf"));
-    } catch (e) { /* Signatur-Schrift optional: bei Fehler wird unten ein Fallback genutzt */ }
-
     // Papierhintergrund (leicht cremefarben statt reinweiß, wirkt hochwertiger)
     doc.rect(0, 0, W, H).fill(paper);
 
@@ -138,7 +132,7 @@ function buildCertificatePdfBuffer(data) {
 
     // Kopfzeile
     doc.fillColor(red).font("Helvetica-Bold").fontSize(12)
-      .text("mSTaRT SICHTUNGSTRAINER", 0, 62, { align: "center", width: W, characterSpacing: 1.2 });
+      .text("SICHTUNGSTRAINER", 0, 62, { align: "center", width: W, characterSpacing: 1.2 });
     doc.fillColor(navy).font("Helvetica-Bold").fontSize(33)
       .text("TEILNAHMEZERTIFIKAT", 0, 88, { align: "center", width: W, characterSpacing: 1 });
     doc.moveTo(W / 2 - 140, 138).lineTo(W / 2 + 140, 138).lineWidth(1.5).strokeColor(gold).stroke();
@@ -151,12 +145,13 @@ function buildCertificatePdfBuffer(data) {
       .text(`${data.vorname} ${data.name}`, 0, 206, { align: "center", width: W });
 
     const datumLang = formatDateLangDE(data.uebungstag);
-    const satz = `erfolgreich an einer ManV-Sichtungsübung nach dem mSTaRT Sichtungsschema am ${datumLang} im Umfang von ${data.ue} Unterrichtseinheiten teilgenommen hat.`;
+    const schema = data.schema || "mSTaRT";
+    const satz = `erfolgreich an einer ManV-Sichtungsübung nach dem Sichtungsschema ${schema} am ${datumLang} im Umfang von ${data.ue} Unterrichtseinheiten teilgenommen hat.`;
     doc.fillColor(ink).font("Helvetica").fontSize(14.5).lineGap(9)
       .text(satz, textX, 256, { width: textW, align: "center" });
 
-    // Siegel: deutlich größer als zentrales, blickfangendes Element der Seite
-    drawSeal(doc, W / 2, 492, 120);
+    // Siegel: ca. 1/3 kleiner als zuvor (Radius 120 -> 80)
+    drawSeal(doc, W / 2, 470, 80);
 
     // Fusszeile: Ort/Datum links, Unterschrift rechts (zwei Spalten)
     const bottomY = H - 178;
@@ -168,10 +163,11 @@ function buildCertificatePdfBuffer(data) {
     doc.fillColor("#5C6B84").font("Helvetica").fontSize(8)
       .text("Ort, Datum", leftX, bottomY + 30, { width: colW, align: "center" });
 
-    // Handschriftlich wirkende Unterschrift oberhalb der Linie
+    // Eingescanntes Unterschriftsbild oberhalb der Linie (Seitenverhältnis beibehalten)
     try {
-      doc.fillColor(navy).font("Signature").fontSize(28)
-        .text("M. Dommes", rightX, bottomY - 22, { width: colW, align: "center" });
+      const sigPath = path.join(__dirname, "images", "Unterschrift.jpg");
+      const sigW = 150, sigH = sigW * (562 / 1370); // Original-Seitenverhältnis der Datei
+      doc.image(sigPath, rightX + (colW - sigW) / 2, bottomY - sigH + 4, { width: sigW, height: sigH });
     } catch (e) {
       doc.fillColor(navy).font("Helvetica-Oblique").fontSize(15)
         .text("M. Dommes", rightX, bottomY - 2, { width: colW, align: "center" });
@@ -181,7 +177,7 @@ function buildCertificatePdfBuffer(data) {
       .text(`Übungsleiter/in: ${data.uebungsleiter}`, rightX, bottomY + 30, { width: colW, align: "center" });
 
     doc.fillColor("#aaaaaa").font("Helvetica").fontSize(7)
-      .text(`Ausgestellt am ${new Date().toLocaleDateString("de-DE")}`, 0, H - 40, { align: "center", width: W });
+      .text(`Ausgestellt am ${new Date().toLocaleDateString("de-DE")}`, 0, H - 58, { align: "center", width: W });
 
     doc.end();
   });
