@@ -11,7 +11,7 @@
   # vom Bündeln ausnehmen, damit es unverändert (mit seiner Original-Ordnerstruktur
   # samt Schriftdaten) mitgeliefert wird.
   external_node_modules = ["pdfkit"]
-  included_files = ["node_modules/pdfkit/js/data/**", "netlify/functions/fonts/**"]
+  included_files = ["node_modules/pdfkit/js/data/**", "netlify/functions/fonts/**", "netlify/functions/images/**"]
 
 [[headers]]
   for = "/*"

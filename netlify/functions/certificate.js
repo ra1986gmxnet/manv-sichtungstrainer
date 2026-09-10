@@ -15,11 +15,13 @@
 // eingerichtet wurden (siehe DEPLOYMENT.md). Ohne diese ist nur "Ausdrucken/
 // Herunterladen" möglich, kein E-Mail-Versand.
 //
-// Für die handschriftlich wirkende Unterschrift wird eine mitgelieferte
-// Schreibschrift-Schriftart genutzt (netlify/functions/fonts/Signature.ttf,
-// SIL Open Font License). WICHTIG: diese Datei UND netlify.toml
-// (included_files) müssen zusammen deployt werden, sonst schlägt die
-// PDF-Erstellung fehl.
+// Für das Siegel wird ein mitgeliefertes Bild genutzt (netlify/functions/images/
+// Siegel.png), kreisförmig zugeschnitten. Fehlt die Datei ausnahmsweise, greift
+// automatisch eine einfache Vektor-Ersatzgrafik. Für die handschriftlich wirkende
+// Unterschrift wird eine mitgelieferte Schreibschrift-Schriftart genutzt
+// (netlify/functions/fonts/Signature.ttf). WICHTIG: Bild- UND Schriftordner
+// müssen zusammen mit netlify.toml (included_files) deployt werden, sonst schlägt
+// die PDF-Erstellung fehl.
 // ============================================================================
 
 const crypto = require("crypto");
@@ -76,9 +78,19 @@ function formatDateLangDE(input) {
   return `${tag}.${MONATE_DE[d.getMonth()]}.${d.getFullYear()}`;
 }
 
-// ---- Vektorbasierte Hilfsformen (keine Sonderzeichen/Bild-Assets nötig) ----
-function polygonPoints(doc, points, color) { doc.polygon(...points).fill(color); }
+// ---- Siegel: eingebettetes, vom Nutzer geliefertes Bild (kreisförmig zugeschnitten) ----
+function drawSealImage(doc, cx, cy, radius) {
+  const imgPath = path.join(__dirname, "images", "Siegel.png");
+  doc.save();
+  doc.circle(cx, cy, radius).clip();
+  doc.image(imgPath, cx - radius, cy - radius, { width: radius * 2, height: radius * 2 });
+  doc.restore();
+  // Feiner Kontrastring um das Siegel, damit es sich von der cremefarbenen Fläche abhebt
+  doc.circle(cx, cy, radius).lineWidth(1).strokeColor("#B8912F").stroke();
+}
 
+// ---- Fallback: einfache Vektor-Variante, falls die Bilddatei einmal fehlen sollte ----
+function polygonPoints(doc, points, color) { doc.polygon(...points).fill(color); }
 function drawShield(doc, cx, cy, scale, color) {
   const pts = [
     [cx - 13*scale, cy - 15*scale], [cx + 13*scale, cy - 15*scale],
@@ -88,79 +100,18 @@ function drawShield(doc, cx, cy, scale, color) {
   ];
   polygonPoints(doc, pts, color);
 }
-
-function drawBeadedRing(doc, cx, cy, radius, count, beadR, color) {
-  for (let i = 0; i < count; i++) {
-    const angle = (i * 360 / count) * Math.PI / 180;
-    doc.circle(cx + radius * Math.cos(angle), cy + radius * Math.sin(angle), beadR).fill(color);
-  }
+function drawSealFallback(doc, cx, cy) {
+  const navy = "#123A63", gold = "#B8912F", paper = "#FEFCF6";
+  doc.circle(cx, cy, 64).lineWidth(3.5).strokeColor(navy).stroke();
+  doc.circle(cx, cy, 58).fill(paper);
+  doc.circle(cx, cy, 58).lineWidth(1).strokeColor(gold).stroke();
+  drawShield(doc, cx, cy, 1.4, navy);
+  doc.fillColor(navy).font("Helvetica-Bold").fontSize(7)
+    .text("GEPRÜFT", cx - 40, cy + 24, { width: 80, align: "center" });
 }
-
-// Ein kleines, stilisiertes Lorbeerblatt (Ellipse), an Position (x,y) um angleDeg gedreht
-function drawLeaf(doc, x, y, angleDeg, len, wid, color) {
-  doc.save();
-  doc.translate(x, y);
-  doc.rotate(angleDeg, { origin: [0, 0] });
-  doc.ellipse(0, 0, len / 2, wid / 2).fill(color);
-  doc.restore();
-}
-// Lorbeerzweig: eine Reihe kleiner Blätter entlang eines Bogens, symmetrisch links/rechts
-function drawLaurelWreath(doc, cx, cy, radius, color) {
-  const leafCount = 7;
-  for (let side = -1; side <= 1; side += 2) {
-    for (let i = 0; i < leafCount; i++) {
-      const t = i / (leafCount - 1);
-      const angleDeg = side === -1 ? (200 - t * 100) : (-20 + t * 100); // links unten->oben, rechts unten->oben
-      const rad = angleDeg * Math.PI / 180;
-      const lr = radius * (0.98 - t * 0.12);
-      const x = cx + lr * Math.cos(rad);
-      const y = cy + lr * Math.sin(rad);
-      const leafSize = 13 - t * 5;
-      drawLeaf(doc, x, y, angleDeg + 90 * side, leafSize, leafSize * 0.45, color);
-    }
-  }
-}
-
-// Ribbon-Enden unterhalb des Siegels (klassische Medaillen-Optik)
-function drawRibbonTails(doc, cx, topY, color) {
-  const w = 15, len = 46, spread = 9;
-  [-1, 1].forEach((side) => {
-    doc.save();
-    doc.translate(cx + side * spread, topY);
-    doc.rotate(side * 10, { origin: [0, 0] });
-    const pts = [
-      [-w / 2, 0], [w / 2, 0], [w / 2, len], [0, len - 12], [-w / 2, len]
-    ];
-    doc.polygon(...pts).fill(color);
-    doc.restore();
-  });
-}
-
-function drawSeal(doc, cx, cy) {
-  const navy = "#123A63", gold = "#B8912F", goldLight = "#D9C27A", paper = "#FEFCF6", red = "#8f1c17";
-
-  drawRibbonTails(doc, cx, cy + 50, red);
-
-  // Ringe (außen nach innen)
-  doc.circle(cx, cy, 64).lineWidth(1).strokeColor(gold).stroke();
-  drawBeadedRing(doc, cx, cy, 58, 40, 1.3, gold);
-  doc.circle(cx, cy, 52).lineWidth(3.5).strokeColor(navy).stroke();
-  doc.circle(cx, cy, 46).lineWidth(1).strokeColor(gold).stroke();
-  doc.circle(cx, cy, 44).fill(paper);
-  doc.circle(cx, cy, 44).lineWidth(0.75).strokeColor(goldLight).stroke();
-
-  // Lorbeerkranz innerhalb des Rings
-  drawLaurelWreath(doc, cx, cy, 40, gold);
-
-  // Wappen/Schild in der Mitte
-  drawShield(doc, cx, cy - 10, 1.15, navy);
-  drawShield(doc, cx, cy - 10, 0.8, gold);
-
-  // Zweizeiliger Schriftzug unten im Ring
-  doc.fillColor(navy).font("Helvetica-Bold").fontSize(6.5)
-    .text("GEPRÜFT", cx - 34, cy + 14, { width: 68, align: "center", characterSpacing: 0.5 });
-  doc.font("Helvetica").fontSize(5.5).fillColor(navy)
-    .text("TEILNAHME BESTÄTIGT", cx - 34, cy + 23, { width: 68, align: "center" });
+function drawSeal(doc, cx, cy, radius) {
+  try { drawSealImage(doc, cx, cy, radius); }
+  catch (e) { drawSealFallback(doc, cx, cy); }
 }
 
 function buildCertificatePdfBuffer(data) {
@@ -186,29 +137,29 @@ function buildCertificatePdfBuffer(data) {
     doc.rect(37, 37, W - 74, H - 74).lineWidth(1).stroke(gold);
 
     // Kopfzeile
-    doc.fillColor(red).font("Helvetica-Bold").fontSize(11)
-      .text("mSTaRT SICHTUNGSTRAINER", 0, 70, { align: "center", width: W, characterSpacing: 1 });
-    doc.fillColor(navy).font("Helvetica-Bold").fontSize(29)
-      .text("TEILNAHMEZERTIFIKAT", 0, 94, { align: "center", width: W, characterSpacing: 1 });
-    doc.moveTo(W / 2 - 130, 138).lineTo(W / 2 + 130, 138).lineWidth(1.5).strokeColor(gold).stroke();
+    doc.fillColor(red).font("Helvetica-Bold").fontSize(12)
+      .text("mSTaRT SICHTUNGSTRAINER", 0, 62, { align: "center", width: W, characterSpacing: 1.2 });
+    doc.fillColor(navy).font("Helvetica-Bold").fontSize(33)
+      .text("TEILNAHMEZERTIFIKAT", 0, 88, { align: "center", width: W, characterSpacing: 1 });
+    doc.moveTo(W / 2 - 140, 138).lineTo(W / 2 + 140, 138).lineWidth(1.5).strokeColor(gold).stroke();
 
     // Haupttext (fließend, damit unterschiedlich lange Angaben immer sauber umbrechen)
-    const textW = 460, textX = (W - textW) / 2;
-    doc.fillColor(ink).font("Helvetica").fontSize(13)
-      .text("Hiermit wird bestätigt, dass", 0, 168, { align: "center", width: W });
-    doc.fillColor(navy).font("Helvetica-Bold").fontSize(26)
-      .text(`${data.vorname} ${data.name}`, 0, 194, { align: "center", width: W });
+    const textW = 480, textX = (W - textW) / 2;
+    doc.fillColor(ink).font("Helvetica").fontSize(14)
+      .text("Hiermit wird bestätigt, dass", 0, 176, { align: "center", width: W });
+    doc.fillColor(navy).font("Helvetica-Bold").fontSize(30)
+      .text(`${data.vorname} ${data.name}`, 0, 206, { align: "center", width: W });
 
     const datumLang = formatDateLangDE(data.uebungstag);
     const satz = `erfolgreich an einer ManV-Sichtungsübung nach dem mSTaRT Sichtungsschema am ${datumLang} im Umfang von ${data.ue} Unterrichtseinheiten teilgenommen hat.`;
-    doc.fillColor(ink).font("Helvetica").fontSize(13).lineGap(6)
-      .text(satz, textX, 236, { width: textW, align: "center" });
+    doc.fillColor(ink).font("Helvetica").fontSize(14.5).lineGap(9)
+      .text(satz, textX, 256, { width: textW, align: "center" });
 
-    // Siegel, zentriert im unteren Drittel
-    drawSeal(doc, W / 2, 500);
+    // Siegel: deutlich größer als zentrales, blickfangendes Element der Seite
+    drawSeal(doc, W / 2, 492, 120);
 
     // Fusszeile: Ort/Datum links, Unterschrift rechts (zwei Spalten)
-    const bottomY = H - 150;
+    const bottomY = H - 178;
     const colW = 210, leftX = 70, rightX = W - 70 - colW;
 
     doc.fillColor(ink).font("Helvetica").fontSize(12)
@@ -219,8 +170,8 @@ function buildCertificatePdfBuffer(data) {
 
     // Handschriftlich wirkende Unterschrift oberhalb der Linie
     try {
-      doc.fillColor(navy).font("Signature").fontSize(26)
-        .text("M. Dommes", rightX, bottomY - 20, { width: colW, align: "center" });
+      doc.fillColor(navy).font("Signature").fontSize(28)
+        .text("M. Dommes", rightX, bottomY - 22, { width: colW, align: "center" });
     } catch (e) {
       doc.fillColor(navy).font("Helvetica-Oblique").fontSize(15)
         .text("M. Dommes", rightX, bottomY - 2, { width: colW, align: "center" });
@@ -230,7 +181,7 @@ function buildCertificatePdfBuffer(data) {
       .text(`Übungsleiter/in: ${data.uebungsleiter}`, rightX, bottomY + 30, { width: colW, align: "center" });
 
     doc.fillColor("#aaaaaa").font("Helvetica").fontSize(7)
-      .text(`Ausgestellt am ${new Date().toLocaleDateString("de-DE")}`, 0, H - 44, { align: "center", width: W });
+      .text(`Ausgestellt am ${new Date().toLocaleDateString("de-DE")}`, 0, H - 40, { align: "center", width: W });
 
     doc.end();
   });
