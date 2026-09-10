@@ -3,14 +3,12 @@
   functions = "netlify/functions"
 
 [functions]
-  included_files = [
-    "node_modules/pdfkit/js/data/**",
-    "node_modules/pdfkit/js/data/*.afm",
-    "node_modules/pdfkit/js/font/data/**",
-    "node_modules/pdfkit/**/*"
-  ]
-
-
+  node_bundler = "esbuild"
+  # pdfkit lädt zur Laufzeit eigene Schriftart-Metrikdateien (.afm) aus seinem
+  # node_modules-Ordner. esbuild bündelt zwar den JS-Code, kopiert solche über
+  # fs.readFileSync geladenen Nicht-JS-Dateien aber NICHT automatisch mit — ohne
+  # diese Zeile schlägt jede PDF-Erstellung (Zertifikate) zur Laufzeit fehl.
+  included_files = ["node_modules/pdfkit/js/data/**", "netlify/functions/fonts/**"]
 
 [[headers]]
   for = "/*"

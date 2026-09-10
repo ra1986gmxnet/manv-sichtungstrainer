@@ -297,6 +297,10 @@ oder als PDF zum Ausdrucken in einem neuen Tab geöffnet.
   gesetzt sein (siehe Abschnitt "Echte E-Mail-Verifizierung" oben).
 - Die Bibliothek `pdfkit` für die PDF-Erstellung wird automatisch über
   `package.json` mitinstalliert — keine weitere Aktion nötig.
+- **Wichtig beim Hochladen:** Die Datei `netlify/functions/fonts/Signature.ttf`
+  (Schreibschrift für die Unterschrift) muss mit genau diesem Pfad im Repo liegen
+  — ohne sie schlägt die PDF-Erstellung fehl bzw. die Unterschrift erscheint in
+  einer Ersatzschrift statt in Schreibschrift.
 
 ---
 
