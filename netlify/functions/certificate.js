@@ -15,11 +15,14 @@
 // eingerichtet wurden (siehe DEPLOYMENT.md). Ohne diese ist nur "Ausdrucken/
 // Herunterladen" möglich, kein E-Mail-Versand.
 //
-// Für das Siegel und die Unterschrift werden mitgelieferte Bilder genutzt
-// (netlify/functions/images/Siegel.png bzw. Unterschrift.jpg). Fehlt eine Datei
-// ausnahmsweise, greift jeweils ein einfacher Text-Fallback. WICHTIG: der
-// gesamte Bilderordner muss zusammen mit netlify.toml (included_files) deployt
-// werden, sonst schlägt die PDF-Erstellung fehl.
+// Für das Siegel wird ein mitgeliefertes Bild genutzt (netlify/functions/images/
+// Siegel.png). Die Unterschrift wird ANHAND DER SIGNATUR-ID des im Zertifikat-
+// Formular ausgewählten Übungsleiters geladen (netlify/functions/images/01.jpg,
+// 02.jpg, 03.jpg, ...). Diese IDs werden vom Admin je Nutzerkonto in der
+// Nutzerverwaltung hinterlegt. Fehlt eine Datei ausnahmsweise, greift jeweils ein
+// einfacher Text-Fallback. WICHTIG: der gesamte Bilderordner muss zusammen mit
+// netlify.toml (included_files) deployt werden, sonst schlägt die PDF-Erstellung
+// fehl.
 // ============================================================================
 
 const crypto = require("crypto");
@@ -163,14 +166,21 @@ function buildCertificatePdfBuffer(data) {
     doc.fillColor("#5C6B84").font("Helvetica").fontSize(8)
       .text("Ort, Datum", leftX, bottomY + 30, { width: colW, align: "center" });
 
-    // Eingescanntes Unterschriftsbild oberhalb der Linie (Seitenverhältnis beibehalten)
+    // Eingescanntes Unterschriftsbild oberhalb der Linie, anhand der Signatur-ID des im
+    // Formular ausgewählten Übungsleiters (z.B. Signatur-ID "01" -> images/01.jpg).
+    // Seitenverhältnis wird automatisch aus der jeweiligen Bilddatei ermittelt, damit
+    // unterschiedlich große Unterschrift-Scans nicht verzerrt werden.
     try {
-      const sigPath = path.join(__dirname, "images", "Unterschrift.jpg");
-      const sigW = 150, sigH = sigW * (562 / 1370); // Original-Seitenverhältnis der Datei
-      doc.image(sigPath, rightX + (colW - sigW) / 2, bottomY - sigH + 4, { width: sigW, height: sigH });
+      const rawId = (data.signaturId || "").toString().trim();
+      if (!rawId) throw new Error("Kein Übungsleiter mit hinterlegter Signatur-ID ausgewählt");
+      const idPadded = rawId.padStart(2, "0");
+      const sigPath = path.join(__dirname, "images", `${idPadded}.jpg`);
+      const img = doc.openImage(sigPath);
+      const sigW = 150, sigH = sigW * (img.height / img.width);
+      doc.image(img, rightX + (colW - sigW) / 2, bottomY - sigH + 4, { width: sigW, height: sigH });
     } catch (e) {
       doc.fillColor(navy).font("Helvetica-Oblique").fontSize(15)
-        .text("M. Dommes", rightX, bottomY - 2, { width: colW, align: "center" });
+        .text(data.uebungsleiter || "", rightX, bottomY - 2, { width: colW, align: "center" });
     }
     doc.moveTo(rightX, bottomY + 26).lineTo(rightX + colW, bottomY + 26).lineWidth(0.75).strokeColor("#888").stroke();
     doc.fillColor("#5C6B84").font("Helvetica").fontSize(8)

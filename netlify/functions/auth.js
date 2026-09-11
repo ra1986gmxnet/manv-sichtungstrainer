@@ -278,6 +278,20 @@ exports.handler = async function (event) {
       return resp({ ok: true });
     }
 
+    // ---------------- ÜBUNGSLEITER-LISTE FÜR ZERTIFIKATE (jedes gültige Token) ----------------
+    // Bewusst eine eigene, schwächer abgesicherte Aktion (kein Admin-Token nötig), da auch
+    // Übungsleiter (nicht nur Admins) beim Zertifikate-Erstellen den passenden Übungsleiter samt
+    // hinterlegter Signatur-ID auswählen können müssen. Es werden NUR unkritische Felder
+    // zurückgegeben (kein Passwort-Hash, keine E-Mail, kein Sperrstatus).
+    if (payload.action === "listTrainers") {
+      const claims = verifyToken(payload.token, SECRET);
+      if (!claims) return resp({ ok: false, error: "Sitzung abgelaufen oder ungültig – bitte neu einloggen" });
+      const trainers = Object.values(users)
+        .filter(u => u.role === "admin" || u.role === "uebungsleiter")
+        .map(u => ({ username: u.username, role: u.role, signaturId: u.signaturId || "" }));
+      return resp({ ok: true, trainers });
+    }
+
     // ---------------- ADMIN-AKTIONEN (erfordern gültiges Admin-Token) ----------------
     if (payload.action === "adminOp") {
       const claims = verifyToken(payload.token, SECRET);
@@ -302,7 +316,7 @@ exports.handler = async function (event) {
         const { salt, hash } = hashPassword(p.password);
         users[p.username] = { username: p.username, email: p.email || "", role: p.role || "teilnehmer",
           locked: false, createdAt: nowStamp(), lastLogin: null, passwordSalt: salt, passwordHash: hash,
-          emailVerified: true }; // vom Admin direkt angelegt -> keine Mail-Verifizierung nötig
+          emailVerified: true, signaturId: p.signaturId || "" }; // vom Admin direkt angelegt -> keine Mail-Verifizierung nötig
         await saveUsers(users);
         return resp({ ok: true });
       }
@@ -321,6 +335,7 @@ exports.handler = async function (event) {
         if (p.email !== undefined) u.email = p.email;
         if (p.role !== undefined) u.role = p.role;
         if (p.locked !== undefined) u.locked = p.locked;
+        if (p.signaturId !== undefined) u.signaturId = p.signaturId;
         await saveUsers(users);
         return resp({ ok: true, finalUsername });
       }
