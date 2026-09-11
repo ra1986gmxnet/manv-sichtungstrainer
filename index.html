@@ -2212,20 +2212,23 @@ function openCreateUserModal(){
           <option value="admin">admin</option>
         </select>
       </div>
+      <div class="field"><label>Signatur-ID (für Zertifikate, optional)</label>
+        <input id="cu-signatur" placeholder="z.B. 01 (Bilddatei 01.jpg im images-Ordner)"></div>
       <button class="btn btn-primary" style="width:100%" onclick="createUserByAdmin(
         document.getElementById('cu-user').value,
         document.getElementById('cu-pass').value,
         document.getElementById('cu-mail').value,
-        document.getElementById('cu-role').value)">Nutzer anlegen</button>
+        document.getElementById('cu-role').value,
+        document.getElementById('cu-signatur').value)">Nutzer anlegen</button>
     </div>
   </div>`;
   render();
 }
-async function createUserByAdmin(username, password, email, role){
+async function createUserByAdmin(username, password, email, role, signaturId){
   username = (username||'').trim();
   if(!username || !password || password.length<3){ toast('Benutzername und ein Passwort mit mind. 3 Zeichen erforderlich'); return; }
   if(St.authToken){
-    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'createUser', opPayload:{username, password, email, role}});
+    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'createUser', opPayload:{username, password, email, role, signaturId}});
     if(r){
       if(!r.ok){ toast(r.error||'Fehler'); return; }
       await refreshUsersFromApi();
@@ -2236,7 +2239,7 @@ async function createUserByAdmin(username, password, email, role){
   }
   if(St.users[username]){ toast('Benutzername bereits vergeben'); return; }
   const newUser = {username, email:email||'', role: role||'teilnehmer', locked:false,
-    createdAt:nowStamp(), lastLogin:null, emailVerified:true};
+    createdAt:nowStamp(), lastLogin:null, emailVerified:true, signaturId: signaturId||''};
   await setPasswordHash(newUser, password);
   St.users[username] = newUser;
   const ok = await saveKeyRetry('users', St.users);
@@ -2267,6 +2270,8 @@ function openEditUserModal(username){
           <option value="1" ${u.locked?'selected':''}>gesperrt</option>
         </select>
       </div>
+      <div class="field"><label>Signatur-ID (für Zertifikate, optional)</label>
+        <input id="eu-signatur" value="${u.signaturId||''}" placeholder="z.B. 01 (Bilddatei 01.jpg im images-Ordner)"></div>
       <button class="btn btn-primary" style="width:100%" onclick="saveEditedUser('${u.username}')">Änderungen speichern</button>
     </div>
   </div>`;
@@ -2280,13 +2285,14 @@ async function saveEditedUser(oldUsername){
   const newEmail = getVal('eu-mail');
   const newRole = isSelf ? u.role : getVal('eu-role');
   const newLocked = isSelf ? !!u.locked : getVal('eu-locked')==='1';
+  const newSignaturId = getVal('eu-signatur');
 
   if(!newUsername){ toast('Benutzername darf nicht leer sein'); return; }
   if(newUsername!==oldUsername && St.users[newUsername]){ toast('Dieser Benutzername ist bereits vergeben'); return; }
 
   if(St.authToken){
     const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'editUser', opPayload:{
-      oldUsername, newUsername: newUsername!==oldUsername?newUsername:undefined, email:newEmail, role:newRole, locked:newLocked
+      oldUsername, newUsername: newUsername!==oldUsername?newUsername:undefined, email:newEmail, role:newRole, locked:newLocked, signaturId:newSignaturId
     }});
     if(r){
       if(!r.ok){ toast(r.error||'Fehler'); return; }
@@ -2325,6 +2331,7 @@ async function saveEditedUser(oldUsername){
   u.email = newEmail;
   u.role = newRole;
   u.locked = newLocked;
+  u.signaturId = newSignaturId;
   const ok = await saveKeyRetry('users', St.users);
   if(!ok){ toast('Fehler: Änderungen konnten nicht gespeichert werden'); render(); return; }
   toast('Nutzer gespeichert');
@@ -3160,10 +3167,15 @@ async function resetExercise(exId){
 }
 
 // ====================== TEILNAHMEZERTIFIKATE (nur Übungsleiter/Admin) ======================
-function openCertificates(exId){
+async function openCertificates(exId){
   St.currentExerciseId = exId;
   if(!St.certRows || !St.certRows.length){
     St.certRows = [{id:uid(), name:'', vorname:'', email:''}];
+  }
+  St.certTrainers = [];
+  if(St.authToken){
+    const r = await callAuthApi({action:'listTrainers', token:St.authToken});
+    if(r && r.ok) St.certTrainers = r.trainers;
   }
   go('certificates');
 }
@@ -3203,8 +3215,18 @@ function getCertFormValues(){
   const getVal = id => { const el=document.getElementById(id); return el ? el.value.trim() : ''; };
   const schemaSelect = getVal('cf-schema');
   const schema = schemaSelect==='frei' ? getVal('cf-schema-frei') : schemaSelect;
+
+  const leiterSelect = getVal('cf-leiter-select');
+  let uebungsleiter = '', signaturId = '';
+  if(leiterSelect==='frei'){
+    uebungsleiter = getVal('cf-leiter-frei');
+  }else{
+    const t = (St.certTrainers||[]).find(x=>x.username===leiterSelect);
+    uebungsleiter = leiterSelect;
+    signaturId = t ? (t.signaturId||'') : '';
+  }
   return {
-    uebungstag: getVal('cf-tag'), uebungsleiter: getVal('cf-leiter'),
+    uebungstag: getVal('cf-tag'), uebungsleiter, signaturId,
     thema: getVal('cf-thema'), ue: getVal('cf-ue'), ort: getVal('cf-ort'),
     schema
   };
@@ -3212,6 +3234,11 @@ function getCertFormValues(){
 function onCertSchemaChange(){
   const sel = document.getElementById('cf-schema');
   const freiField = document.getElementById('cf-schema-frei-field');
+  if(freiField) freiField.style.display = (sel.value==='frei') ? '' : 'none';
+}
+function onCertLeiterChange(){
+  const sel = document.getElementById('cf-leiter-select');
+  const freiField = document.getElementById('cf-leiter-frei-field');
   if(freiField) freiField.style.display = (sel.value==='frei') ? '' : 'none';
 }
 
@@ -3289,7 +3316,8 @@ function viewCertificates(){
   const defaultThema = 'ManV-Sichtungsübung nach dem mSTaRT Sichtungsschema';
   const defaultTag = (ex && ex.datum) || '';
   const defaultOrt = (ex && ex.ort) || '';
-  const defaultLeiter = 'Martin Dommes';
+  const trainers = St.certTrainers || [];
+  const currentUsername = St.user ? St.user.username : '';
 
   const rows = St.certRows.map(r=>`
     <tr>
@@ -3314,7 +3342,16 @@ function viewCertificates(){
 
       <div class="row">
         <div class="field"><label>Übungstag</label><input id="cf-tag" type="date" value="${defaultTag}"></div>
-        <div class="field"><label>Übungsleiter/in</label><input id="cf-leiter" value="${defaultLeiter}"></div>
+        <div class="field">
+          <label>Übungsleiter/in auswählen</label>
+          <select id="cf-leiter-select" onchange="onCertLeiterChange()">
+            ${trainers.map(t=>`<option value="${t.username}" ${t.username===currentUsername?'selected':''}>${t.username} (${t.role})${t.signaturId?' — Signatur '+t.signaturId:' — keine Signatur hinterlegt'}</option>`).join('')}
+            <option value="frei" ${!trainers.length?'selected':''}>Andere Person (freie Eingabe)…</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" id="cf-leiter-frei-field" style="display:${trainers.length?'none':''};">
+        <div class="field"><label>Name Übungsleiter/in</label><input id="cf-leiter-frei" placeholder="Vor- und Nachname"></div>
       </div>
       <div class="row">
         <div class="field">
