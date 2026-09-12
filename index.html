@@ -280,6 +280,7 @@ const St = {
   patientOpenedAtMs:null,
   authToken:null,
   pendingVerifyUsername:null,
+  resetToken:null,
   selectedBodyPart:null,
   reveal:{},           // fieldKey -> true, reset per patient view
   timer:{active:false,field:null,remaining:0,intervalId:null},
@@ -295,6 +296,10 @@ const St = {
 
 const CATS = ['rot','gelb','gruen','blau','schwarz'];
 const CAT_LABEL = {rot:'Rot',gelb:'Gelb',gruen:'Grün',blau:'Blau',schwarz:'Schwarz'};
+// Spiegelt PROTECTED_ADMIN_USERNAME aus auth.js: rein für die Client-UI (z.B. Rollen-Dropdown
+// sperren, Löschen-Button ausblenden). Die eigentliche, verbindliche Absicherung erfolgt
+// serverseitig in auth.js — diese Konstante ist nur eine zusätzliche UX-/Fallback-Schicht.
+const PROTECTED_ADMIN_USERNAME = 'Martin';
 const PRESET_ROLES = ['1. RTW','2. RTW','3. RTW','4. RTW','5. RTW','1. NEF','2. NEF','3. NEF','4. NEF','5. NEF',
   'LNA','OrgL','GW San','AB ManV','BHP 50','BTP 500'];
 
@@ -474,6 +479,9 @@ async function init(){
   const params = new URLSearchParams(location.search);
   if(params.get('pid')){
     St.pendingDeepLink = {pid: parseInt(params.get('pid'))};
+  }
+  if(params.get('resetToken')){
+    St.resetToken = params.get('resetToken');
   }
 
   // Lokaler Nutzer-Cache: dient nur noch dem Fallback-Betrieb (ohne eingerichtete
@@ -2150,6 +2158,7 @@ async function toggleLock(username){
   render();
 }
 async function deleteUser(username){
+  if(username===PROTECTED_ADMIN_USERNAME){ toast(`Der Admin "${PROTECTED_ADMIN_USERNAME}" kann nicht gelöscht werden.`); return; }
   if(St.user && St.user.username===username){ toast('Du kannst dein eigenes Konto hier nicht löschen'); return; }
   if(St.authToken){
     const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'deleteUser', opPayload:{username}});
@@ -2259,7 +2268,7 @@ function openEditUserModal(username){
       <div class="field"><label>Benutzername</label><input id="eu-user" value="${u.username}"></div>
       <div class="field"><label>E-Mail</label><input id="eu-mail" type="email" value="${u.email||''}"></div>
       <div class="field"><label>Rolle</label>
-        <select id="eu-role" ${isSelf?'disabled':''}>
+        <select id="eu-role" ${(isSelf || u.username===PROTECTED_ADMIN_USERNAME)?'disabled':''}>
           ${['teilnehmer','uebungsleiter','admin'].map(r=>`<option value="${r}" ${u.role===r?'selected':''}>${r}</option>`).join('')}
         </select>
       </div>
@@ -2283,12 +2292,15 @@ async function saveEditedUser(oldUsername){
   const getVal = (id)=>{ const el = document.getElementById(id); return el ? el.value : ''; };
   const newUsername = (getVal('eu-user')||oldUsername).trim();
   const newEmail = getVal('eu-mail');
-  const newRole = isSelf ? u.role : getVal('eu-role');
+  const newRole = (isSelf || u.username===PROTECTED_ADMIN_USERNAME) ? u.role : getVal('eu-role');
   const newLocked = isSelf ? !!u.locked : getVal('eu-locked')==='1';
   const newSignaturId = getVal('eu-signatur');
 
   if(!newUsername){ toast('Benutzername darf nicht leer sein'); return; }
   if(newUsername!==oldUsername && St.users[newUsername]){ toast('Dieser Benutzername ist bereits vergeben'); return; }
+  if(oldUsername===PROTECTED_ADMIN_USERNAME && newUsername!==oldUsername){
+    toast(`Der Admin "${PROTECTED_ADMIN_USERNAME}" kann nicht umbenannt werden.`); return;
+  }
 
   if(St.authToken){
     const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'editUser', opPayload:{
@@ -2453,6 +2465,56 @@ function viewRegisterPending(){
   </div>`;
 }
 
+function viewForgotPassword(){
+  return `
+  <div class="wrap-narrow">
+    <div style="text-align:center;margin-bottom:26px;">
+      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> Passwort vergessen</div>
+    </div>
+    <div class="card">
+      <p class="small">Gib deinen Benutzernamen oder deine E-Mail-Adresse ein. Falls ein passendes Konto
+        existiert, senden wir dir eine E-Mail mit einem Link zum Zurücksetzen des Passworts.</p>
+      <div class="field"><label>Benutzername oder E-Mail</label><input id="fp-identifier"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="submitForgotPassword(document.getElementById('fp-identifier').value)">Link anfordern</button>
+      <p style="text-align:center;margin-top:14px;"><a href="#" onclick="go('login');return false;" style="color:var(--blue);font-weight:700;">Zurück zur Anmeldung</a></p>
+    </div>
+  </div>`;
+}
+async function submitForgotPassword(identifier){
+  if(!identifier || !identifier.trim()){ toast('Bitte Benutzername oder E-Mail eingeben'); return; }
+  const r = await callAuthApi({action:'requestPasswordReset', identifier:identifier.trim()});
+  if(!r){ toast('Server nicht erreichbar'); return; }
+  if(!r.ok){ toast(r.error||'Fehler'); return; }
+  toast(r.message || 'Falls ein Konto existiert, wurde eine E-Mail verschickt.');
+  go('login');
+}
+
+function viewResetPassword(){
+  return `
+  <div class="wrap-narrow">
+    <div style="text-align:center;margin-bottom:26px;">
+      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> Neues Passwort vergeben</div>
+    </div>
+    <div class="card">
+      <div class="field"><label>Neues Passwort</label><input id="rp-pass" type="password" placeholder="Mindestens 6 Zeichen"></div>
+      <div class="field"><label>Neues Passwort bestätigen</label><input id="rp-pass2" type="password"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="submitResetPassword(document.getElementById('rp-pass').value, document.getElementById('rp-pass2').value)">Passwort setzen</button>
+    </div>
+  </div>`;
+}
+async function submitResetPassword(newPassword, newPassword2){
+  if(!newPassword || newPassword.length<6){ toast('Passwort muss mindestens 6 Zeichen lang sein'); return; }
+  if(newPassword !== newPassword2){ toast('Passwörter stimmen nicht überein'); return; }
+  const r = await callAuthApi({action:'confirmPasswordReset', resetToken:St.resetToken, newPassword});
+  if(!r){ toast('Server nicht erreichbar'); return; }
+  if(!r.ok){ toast(r.error||'Fehler'); return; }
+  St.resetToken = null;
+  // Token aus der URL entfernen, damit ein Reload nicht wieder dieselbe Seite zeigt
+  try{ history.replaceState(null,'',location.pathname); }catch(e){}
+  toast('Passwort erfolgreich geändert – bitte anmelden');
+  go('login');
+}
+
 function viewLogin(){
   return `
   <div class="wrap-narrow">
@@ -2465,7 +2527,7 @@ function viewLogin(){
       <div class="field"><label>Passwort</label><input id="li-pass" type="password" placeholder="Passwort"></div>
       <button class="btn btn-primary" style="width:100%" onclick="doLogin(document.getElementById('li-user').value, document.getElementById('li-pass').value)">Anmelden</button>
       <p style="text-align:center;margin-top:14px;">Noch kein Konto? <a href="#" onclick="go('register');return false;" style="color:var(--blue);font-weight:700;">Jetzt registrieren</a></p>
-      <p style="text-align:center;margin-top:6px;"><a href="#" onclick="go('setup');return false;" style="color:var(--muted);font-size:.78rem;">Noch kein Admin-Konto vorhanden? Ersteinrichtung starten</a></p>
+      <p style="text-align:center;margin-top:6px;"><a href="#" onclick="go('forgotPassword');return false;" style="color:var(--muted);font-size:.85rem;">Passwort vergessen?</a></p>
     </div>
   </div>`;
 }
@@ -3671,7 +3733,7 @@ function adminUsers(){
         <button class="btn btn-sm" onclick="openEditUserModal('${u.username}')">Ändern</button>
         <button class="btn btn-sm" ${isSelf?'disabled':''} onclick="toggleLock('${u.username}')">${u.locked?'Entsperren':'Sperren'}</button>
         <button class="btn btn-sm" onclick="openSetPasswordModal('${u.username}')">Passwort setzen</button>
-        ${!isSelf?`<button class="btn btn-sm btn-danger" onclick="deleteUser('${u.username}')">Löschen</button>`:''}
+        ${(!isSelf && u.username!==PROTECTED_ADMIN_USERNAME)?`<button class="btn btn-sm btn-danger" onclick="deleteUser('${u.username}')">Löschen</button>`:''}
       </td>
     </tr>`;
   }).join('');
@@ -3721,10 +3783,15 @@ function adminExercises(){
 function render(){
   const el = document.getElementById('app');
   let body = '';
-  if(!St.user){
+  if(St.resetToken){
+    // Hat Vorrang vor allem anderen: ein Reset-Link funktioniert unabhängig davon,
+    // ob gerade jemand eingeloggt ist oder nicht.
+    body = viewResetPassword();
+  }else if(!St.user){
     if(St.route==='setup') body = viewSetup();
     else if(St.route==='register') body = viewRegister();
     else if(St.route==='registerPending') body = viewRegisterPending();
+    else if(St.route==='forgotPassword') body = viewForgotPassword();
     else body = viewLogin();
   }else{
     // Zusätzliche Absicherung: Admin-Bereich (inkl. KI-Patientengenerierung) ist
