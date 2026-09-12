@@ -19,6 +19,18 @@
 // FIREBASE_SERVICE_ACCOUNT_JSON und SESSION_SECRET in den Netlify-Projekteinstellungen.
 // ============================================================================
 
+// ---------------- UNVERÄNDERLICHER ADMIN-SCHUTZ FÜR "Martin" ----------------
+// Der Admin-Account "Martin" kann nie gelöscht werden (siehe deleteUser weiter unten).
+// Zusätzlich ist hier fest (NICHT über die Oberfläche änderbar) eine Backup-
+// Wiederherstellungs-E-Mail hinterlegt: Egal was am Konto "Martin" verändert wird
+// (E-Mail geändert, Passwort vergessen, sogar Rolle/Sperrstatus manipuliert) — über
+// "Passwort vergessen?" mit GENAU dieser E-Mail-Adresse bekommt der Account "Martin"
+// jederzeit ein neues Passwort UND automatisch Admin-Rechte sowie einen entsperrten
+// Status zurück. Das ist bewusst ein Stück Code, kein Datenbankfeld, damit es auch
+// dann noch funktioniert, wenn jemand versucht, das Konto zu manipulieren.
+const PROTECTED_ADMIN_USERNAME = "Martin";
+const PROTECTED_ADMIN_BACKUP_EMAIL = "martin.dommes@gmail.com";
+
 const crypto = require("crypto");
 const admin = require("firebase-admin");
 const nodemailer = require("nodemailer");
@@ -278,7 +290,79 @@ exports.handler = async function (event) {
       return resp({ ok: true });
     }
 
-    // ---------------- ÜBUNGSLEITER-LISTE FÜR ZERTIFIKATE (jedes gültige Token) ----------------
+    // ---------------- PASSWORT VERGESSEN: E-MAIL MIT RESET-LINK ANFORDERN ----------------
+    if (payload.action === "requestPasswordReset") {
+      const identifier = (payload.identifier || "").trim();
+      if (!identifier) return resp({ ok: false, error: "Bitte Benutzername oder E-Mail-Adresse angeben" });
+      if (!EMAIL_CONFIGURED) {
+        return resp({ ok: false, error: "Mailversand ist serverseitig nicht konfiguriert — bitte einen Admin um ein neues Passwort bitten." });
+      }
+
+      let targetUser = null;
+      let sendToEmail = null;
+
+      // Unveränderlicher Wiederherstellungsweg: DIESE E-Mail führt IMMER zum Konto
+      // "Martin", unabhängig davon, welche E-Mail dort aktuell tatsächlich hinterlegt ist.
+      if (identifier.toLowerCase() === PROTECTED_ADMIN_BACKUP_EMAIL) {
+        targetUser = users[PROTECTED_ADMIN_USERNAME] || null;
+        sendToEmail = PROTECTED_ADMIN_BACKUP_EMAIL;
+      } else {
+        targetUser = users[identifier] ||
+          Object.values(users).find(u => (u.email || "").toLowerCase() === identifier.toLowerCase()) || null;
+        sendToEmail = targetUser ? targetUser.email : null;
+      }
+
+      // Aus Sicherheitsgründen (keine Konto-Enumeration) IMMER dieselbe Erfolgsmeldung,
+      // unabhängig davon, ob ein passendes Konto gefunden wurde.
+      const genericOk = resp({ ok: true, message: "Falls ein Konto mit dieser Angabe existiert, wurde eine E-Mail mit einem Link zum Zurücksetzen verschickt." });
+      if (!targetUser || !sendToEmail) return genericOk;
+
+      const token = crypto.randomBytes(24).toString("hex");
+      targetUser.resetToken = token;
+      targetUser.resetTokenExpires = Date.now() + 3600 * 1000; // 1 Stunde gültig
+      await saveUsers(users);
+
+      const link = `https://${event.headers.host}/?resetToken=${token}`;
+      try {
+        await sendMail(sendToEmail, "Passwort zurücksetzen",
+          `<p>Hallo ${targetUser.username},</p>
+           <p>für dein Konto beim mSTaRT Sichtungstrainer wurde ein Zurücksetzen des Passworts angefordert.
+           Falls du das warst, klicke auf folgenden Link, um ein neues Passwort zu vergeben:</p>
+           <p><a href="${link}">${link}</a></p>
+           <p>Der Link ist 1 Stunde gültig. Falls du das nicht warst, kannst du diese E-Mail ignorieren —
+           dein Passwort bleibt unverändert.</p>`);
+      } catch (mailErr) {
+        console.error("Passwort-Reset-Mail fehlgeschlagen:", mailErr.message);
+      }
+      return genericOk;
+    }
+
+    // ---------------- PASSWORT VERGESSEN: NEUES PASSWORT MIT TOKEN SETZEN ----------------
+    if (payload.action === "confirmPasswordReset") {
+      const { resetToken, newPassword } = payload;
+      if (!resetToken || !newPassword || newPassword.length < 6) {
+        return resp({ ok: false, error: "Ungültige Anfrage oder Passwort zu kurz (mind. 6 Zeichen)" });
+      }
+      const u = Object.values(users).find(x => x.resetToken === resetToken);
+      if (!u) return resp({ ok: false, error: "Der Link ist ungültig oder wurde bereits verwendet." });
+      if (!u.resetTokenExpires || Date.now() > u.resetTokenExpires) {
+        return resp({ ok: false, error: "Der Link ist abgelaufen. Bitte fordere einen neuen an." });
+      }
+      const { salt, hash } = hashPassword(newPassword);
+      delete u.password;
+      u.passwordSalt = salt;
+      u.passwordHash = hash;
+      delete u.resetToken;
+      delete u.resetTokenExpires;
+      u.locked = false; // ein erfolgreicher Reset hebt eine Sperre auf (verhindert Aussperrung)
+      // Unveränderlicher Schutz: beim Konto "Martin" stellt ein erfolgreicher Reset
+      // IMMER auch die Admin-Rolle wieder her, egal was zuvor daran verändert wurde.
+      if (u.username === PROTECTED_ADMIN_USERNAME) u.role = "admin";
+      await saveUsers(users);
+      return resp({ ok: true });
+    }
+
+
     // Bewusst eine eigene, schwächer abgesicherte Aktion (kein Admin-Token nötig), da auch
     // Übungsleiter (nicht nur Admins) beim Zertifikate-Erstellen den passenden Übungsleiter samt
     // hinterlegter Signatur-ID auswählen können müssen. Es werden NUR unkritische Felder
@@ -326,6 +410,9 @@ exports.handler = async function (event) {
         if (!u) return resp({ ok: false, error: "Nutzer nicht gefunden" });
         let finalUsername = p.oldUsername;
         if (p.newUsername && p.newUsername !== p.oldUsername) {
+          if (p.oldUsername === PROTECTED_ADMIN_USERNAME) {
+            return resp({ ok: false, error: `Der Admin "${PROTECTED_ADMIN_USERNAME}" kann nicht umbenannt werden (sonst würde die feste Wiederherstellungs-E-Mail ins Leere laufen).` });
+          }
           if (users[p.newUsername]) return resp({ ok: false, error: "Dieser Benutzername ist bereits vergeben" });
           delete users[p.oldUsername];
           u.username = p.newUsername;
@@ -333,7 +420,12 @@ exports.handler = async function (event) {
           finalUsername = p.newUsername;
         }
         if (p.email !== undefined) u.email = p.email;
-        if (p.role !== undefined) u.role = p.role;
+        if (p.role !== undefined) {
+          if (finalUsername === PROTECTED_ADMIN_USERNAME && p.role !== "admin") {
+            return resp({ ok: false, error: `Die Rolle von "${PROTECTED_ADMIN_USERNAME}" kann nicht von "admin" geändert werden.` });
+          }
+          u.role = p.role;
+        }
         if (p.locked !== undefined) u.locked = p.locked;
         if (p.signaturId !== undefined) u.signaturId = p.signaturId;
         await saveUsers(users);
@@ -353,6 +445,9 @@ exports.handler = async function (event) {
       }
 
       if (op === "deleteUser") {
+        if (p.username === PROTECTED_ADMIN_USERNAME) {
+          return resp({ ok: false, error: `Der Admin "${PROTECTED_ADMIN_USERNAME}" kann nicht gelöscht werden.` });
+        }
         delete users[p.username];
         await saveUsers(users);
         return resp({ ok: true });
