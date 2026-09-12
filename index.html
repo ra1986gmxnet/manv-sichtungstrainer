@@ -1651,7 +1651,8 @@ async function saveExerciseDetails(exId){
   if(modusEl) ex.modus = modusEl.value;
   const pc = parseInt(getVal('exe__patientcount'));
   if(pc && pc>0) ex.patientCount = pc;
-  await saveKey('exercises', St.exercises);
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Übung konnte nicht gespeichert werden.'); return; }
   toast('Übung gespeichert');
   render();
 }
@@ -1667,7 +1668,8 @@ async function regenerateExercisePatients(exId){
   ex.patientIds = sel.ids;
   ex.patientCount = countNow;
   ex.scenario = scenarioNow;
-  await saveKey('exercises', St.exercises);
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Neuauswahl konnte nicht gespeichert werden.'); return; }
   if(sel.shortfall > 0){
     toast(`Neu ausgewählt — Hinweis: nur ${sel.matchingAvailable} passende Patienten gefunden, ${sel.shortfall} wurden ergänzt`);
   }else{
@@ -1681,20 +1683,35 @@ async function addHospital(exId, name, km){
   const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
   ex.krankenhaeuser = ex.krankenhaeuser || [];
   ex.krankenhaeuser.push({id:uid(), name, km: km || '0'});
-  await saveKey('exercises', St.exercises);
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Krankenhaus konnte nicht gespeichert werden.'); return; }
   openExerciseEditModal(exId);
 }
 async function removeHospital(exId, hospId){
   const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
   ex.krankenhaeuser = (ex.krankenhaeuser||[]).filter(h=>h.id!==hospId);
-  await saveKey('exercises', St.exercises);
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Änderung konnte nicht gespeichert werden.'); return; }
   openExerciseEditModal(exId);
 }
 async function deleteExercise(exId){
+  const backupExercises = St.exercises;
+  const backupSichtungen = St.sichtungen[exId];
   St.exercises = St.exercises.filter(e=>e.id!==exId);
   delete St.sichtungen[exId];
-  await saveKey('exercises', St.exercises);
-  await saveKey('sichtungen_index', St.sichtungen);
+  render(); // sofortiges optisches Feedback, wird bei Fehlschlag unten wieder rückgängig gemacht
+
+  const ok1 = await saveKeyRetry('exercises', St.exercises);
+  const ok2 = await saveKeyRetry('sichtungen_index', St.sichtungen);
+  if(!ok1 || !ok2){
+    // Rückgängig machen, damit die Oberfläche nicht fälschlich "gelöscht" zeigt,
+    // obwohl es in der Datenbank nicht wirklich gespeichert wurde.
+    St.exercises = backupExercises;
+    if(backupSichtungen !== undefined) St.sichtungen[exId] = backupSichtungen;
+    toast('Fehler: Übung konnte NICHT gelöscht werden (Datenbank-/Verbindungsfehler). Bitte erneut versuchen.');
+    render();
+    return;
+  }
   toast('Übung gelöscht');
   render();
 }
@@ -1704,7 +1721,8 @@ async function setExerciseStatus(exId, status){
   ex.status = status;
   ex.log = ex.log || [];
   ex.log.push({event:'status:'+status, time:nowStamp(), timeMs:Date.now()});
-  await saveKey('exercises', St.exercises);
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Status konnte nicht gespeichert werden.'); }
   render();
 }
 
@@ -1719,7 +1737,8 @@ async function saveBriefingDetails(exId){
   ex.anfahrtswege = getVal('bf__anfahrt');
   ex.einsatzstelleSicher = getVal('bf__sicher');
   ex.einsatzgrenzen = getVal('bf__grenzen');
-  await saveKey('exercises', St.exercises);
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Briefing konnte nicht gespeichert werden.'); return; }
   toast('Briefing gespeichert');
   render();
 }
@@ -1744,7 +1763,8 @@ async function startExerciseFromBriefing(exId){
   ex.status = 'läuft';
   ex.log = ex.log || [];
   ex.log.push({event:'Übung gestartet (Briefing abgeschlossen)', time:nowStamp(), timeMs:Date.now()});
-  await saveKey('exercises', St.exercises);
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Übung konnte nicht gestartet werden.'); return; }
   toast('Übung gestartet');
   St.currentExerciseId = exId;
   go('cockpit');
@@ -1753,7 +1773,8 @@ async function startExerciseFromBriefing(exId){
 async function joinExercise(exId, role){
   const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
   ex.participants[St.user.username] = role;
-  await saveKey('exercises', St.exercises);
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Beitritt konnte nicht gespeichert werden.'); return; }
   St.currentExerciseId = exId;
   St.currentRole = role;
   saveExerciseSession();
