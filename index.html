@@ -348,9 +348,14 @@ function nowStamp(){ return new Date().toLocaleString('de-DE'); }
 const AUTH_API = '/.netlify/functions/auth';
 const CERT_API = '/.netlify/functions/certificate';
 async function callCertificateApi(payload){
+  return callCertificateApiGeneric(CERT_API, payload);
+}
+// Wie callCertificateApi, aber für eine beliebige Server-Funktions-URL nutzbar
+// (z.B. /.netlify/functions/debriefing-pdf für den Protokoll-Mailversand).
+async function callCertificateApiGeneric(url, payload){
   let httpStatus = null, rawText = '';
   try{
-    const resp = await fetch(CERT_API, {
+    const resp = await fetch(url, {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
     });
     httpStatus = resp.status;
@@ -358,14 +363,13 @@ async function callCertificateApi(payload){
     try{
       return JSON.parse(rawText);
     }catch(parseErr){
-      // Die Funktion hat geantwortet, aber kein gültiges JSON zurückgegeben — meist ein Zeichen
-      // dafür, dass die Funktion selbst nicht existiert (404) oder beim Start abgestürzt ist (502).
-      console.error('Zertifikat-API: ungültige Antwort', httpStatus, rawText.slice(0,500));
-      return { ok:false, error:`Server-Funktion antwortete unerwartet (HTTP ${httpStatus}). ${httpStatus===404?'Die Funktion "certificate" wurde auf dem Server nicht gefunden — ist netlify/functions/certificate.js im Repo enthalten und deployt?':'Rohantwort: '+rawText.slice(0,200)}` };
+      const fnName = url.split('/').pop();
+      console.error('Server-API: ungültige Antwort', url, httpStatus, rawText.slice(0,500));
+      return { ok:false, error:`Server-Funktion antwortete unerwartet (HTTP ${httpStatus}). ${httpStatus===404?`Die Funktion "${fnName}" wurde auf dem Server nicht gefunden — ist netlify/functions/${fnName}.js im Repo enthalten und deployt?`:'Rohantwort: '+rawText.slice(0,200)}` };
     }
   }catch(e){
-    console.error('Zertifikat-API nicht erreichbar', e);
-    return { ok:false, error:'Server-Funktion für Zertifikate ist nicht erreichbar (Netzwerkfehler). Technisches Detail: '+e.message };
+    console.error('Server-API nicht erreichbar', url, e);
+    return { ok:false, error:'Server-Funktion ist nicht erreichbar (Netzwerkfehler). Technisches Detail: '+e.message };
   }
 }
 async function callAuthApi(payload){
@@ -3124,9 +3128,15 @@ function viewDebriefing(){
       <div class="divider"></div>
       <div class="row">
         <button class="btn btn-primary" onclick="exportDebriefingPdf('${ex.id}')">📄 Als PDF erzeugen / drucken</button>
-        <button class="btn" onclick="emailDebriefing('${ex.id}')">✉️ Per E-Mail versenden</button>
       </div>
-      <p class="small">Der PDF-Export öffnet den Druckdialog deines Browsers — dort kannst du direkt drucken oder "Als PDF speichern" wählen. Der E-Mail-Button öffnet dein Standard-Mailprogramm mit einer Zusammenfassung im Text; die PDF-Datei musst du dort manuell anhängen, da ein direkter Versand aus dem Browser heraus technisch nicht möglich ist.</p>
+      <p class="small">Der PDF-Export öffnet den Druckdialog deines Browsers — dort kannst du direkt drucken oder "Als PDF speichern" wählen.</p>
+
+      <div class="section-title">Protokoll per E-Mail versenden</div>
+      <p class="small">Das System erzeugt ein PDF des kompletten Debriefing-Berichts und verschickt es direkt als Anhang an die angegebenen Adressen.</p>
+      <div class="field"><label>E-Mail-Adresse(n)</label>
+        <textarea id="db-emails" rows="2" placeholder="z.B. leiter@feuerwehr.de, org@feuerwehr.de"></textarea></div>
+      <p class="small">Mehrere Adressen durch Komma, Semikolon oder Zeilenumbruch trennen.</p>
+      <button class="btn" ${St.debriefingMailBusy?'disabled':''} onclick="emailDebriefing('${ex.id}')">${St.debriefingMailBusy?'Wird gesendet…':'✉️ Protokoll per E-Mail senden'}</button>
     </div>
   </div>`;
 }
@@ -3170,25 +3180,38 @@ function exportDebriefingPdf(exId){
   w.print();
 }
 
-function emailDebriefing(exId){
+async function emailDebriefing(exId){
   const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const emailsRaw = (document.getElementById('db-emails')||{}).value || '';
+  if(!emailsRaw.trim()){ toast('Bitte mindestens eine E-Mail-Adresse eingeben'); return; }
+
+  const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
   const stats = computeDebriefingStats(exId);
-  const subject = `Debriefing: ${ex.name}`;
-  const bodyLines = [
-    `Debriefing-Zusammenfassung: ${ex.name}`,
-    [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · '),
-    ex.scenario ? `Szenario: ${ex.scenario}` : '',
-    '',
-    `Gesamtzeit der Übung: ${formatDuration(stats.gesamtzeitSek)}`,
-    `Ø Sichtungszeit pro Patient: ${formatDuration(stats.avgDurationSek)}`,
-    `Gesichtete Patienten gesamt: ${stats.totalGesichtet}`,
-    `Richtig gesichtet: ${stats.correct}`,
-    `Falsch gesichtet: ${stats.wrong}`,
-    '',
-    'Hinweis: Bitte den vollständigen Debriefing-Bericht als PDF (Button "Als PDF erzeugen / drucken") separat anhängen.'
-  ].filter(l=>l!==undefined);
-  const body = bodyLines.join('\n');
-  window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const timeline = buildDebriefingTimeline(exId).map(t=>({
+    time: t.time, text: t.text.replace(/[⚙🩺✓✕📢▶]/g,'').trim()
+  }));
+  const briefingFields = [
+    ['Einsatzstichwort', ex.einsatzstichwort], ['Alarmierte Kräfte', ex.alarmierteKraefte],
+    ['Eingetroffene Kräfte', ex.eingetroffeneKraefte], ['Rückmeldungen', ex.rueckmeldungen],
+    ['Aufstellfläche', ex.aufstellflaeche], ['Anfahrtswege', ex.anfahrtswege],
+    ['Einsatzstelle', ex.einsatzstelleSicher], ['Einsatzgrenzen / Gefahrenbereiche', ex.einsatzgrenzen]
+  ].filter(([,v])=>v);
+
+  St.debriefingMailBusy = true; render();
+  const r = await callCertificateApiGeneric('/.netlify/functions/debriefing-pdf', {
+    token: St.authToken, emails: emailsRaw,
+    exName: ex.name, scenario: ex.scenario, meta, status: ex.status,
+    briefingFields, timeline,
+    stats: {
+      gesamtzeitText: formatDuration(stats.gesamtzeitSek),
+      avgDurationText: formatDuration(stats.avgDurationSek),
+      totalGesichtet: stats.totalGesichtet, correct: stats.correct, wrong: stats.wrong
+    }
+  });
+  St.debriefingMailBusy = false;
+  if(!r || !r.ok){ toast((r&&r.error)||'Fehler beim E-Mail-Versand'); render(); return; }
+  toast('Debriefing-PDF gesendet an: '+r.sentTo.join(', '));
+  render();
 }
 
 // ====================== COCKPIT-SCHNELLEINTRÄGE FÜRS DEBRIEFING ======================
