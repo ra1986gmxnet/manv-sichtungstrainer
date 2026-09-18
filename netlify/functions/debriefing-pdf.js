@@ -1,173 +1,3885 @@
-// ============================================================================
-// Erzeugt den Debriefing-Bericht einer Übung als echtes, formatiertes PDF
-// (Einsatzdaten, chronologischer Verlauf, Fazit) und verschickt es als Anhang
-// an eine oder mehrere vom Übungsleiter/Admin angegebene E-Mail-Adressen.
-//
-// Zugriff nur mit gültigem Sitzungs-Token einer Rolle "uebungsleiter" oder
-// "admin" (dasselbe Token-Format wie in auth.js/certificate.js).
-//
-// Benötigt GMAIL_USER, GMAIL_APP_PASSWORD (E-Mail-Versand) sowie SESSION_SECRET
-// (Token-Prüfung). Siehe DEPLOYMENT.md.
-// ============================================================================
 
-const crypto = require("crypto");
-const nodemailer = require("nodemailer");
-const PDFDocument = require("pdfkit");
-
-const headers = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS"
-};
-function resp(obj) { return { statusCode: 200, headers, body: JSON.stringify(obj) }; }
-
-function verifyToken(token, secret) {
-  if (!token || typeof token !== "string" || token.indexOf(".") === -1) return null;
-  const [body, sig] = token.split(".");
-  const expected = crypto.createHmac("sha256", secret).update(body).digest("base64url");
-  try {
-    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-  } catch (e) { return null; }
-  let payload;
-  try { payload = JSON.parse(Buffer.from(body, "base64url").toString()); } catch (e) { return null; }
-  if (payload.exp && Date.now() > payload.exp) return null;
-  return payload;
-}
-
-const EMAIL_CONFIGURED = !!(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
-let mailTransporter = null;
-function getTransporter() {
-  if (!EMAIL_CONFIGURED) return null;
-  if (!mailTransporter) {
-    mailTransporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD }
-    });
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mSTaRT Sichtungstrainer</title>
+<!-- Firebase (Firestore) – kostenlose Datenbank für den Online-Betrieb.
+     Siehe DEPLOYMENT.md, Schritt 2, wie du dein eigenes Firebase-Projekt anlegst. -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root{
+    --red:#E2231A;
+    --red-dim:#FDEBEA;
+    --yellow:#FFCC00;
+    --yellow-dim:#FFF6D6;
+    --amber:#8A6100;
+    --navy:#123A63;
+    --navy2:#0F2A4A;
+    --bg:#F4F8FC;
+    --panel:#FFFFFF;
+    --panel2:#EEF4FB;
+    --ink:#1B2A41;
+    --muted:#66748C;
+    --line:#DCE6F2;
+    --green:#2FAE55;
+    --blue:#2D6CDF;
+    --black:#1E1E1E;
+    --gelb:#FFD400;
+    --radius:12px;
+    font-size:16px;
   }
-  return mailTransporter;
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
+    font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,sans-serif;}
+  #app{min-height:100vh;padding-bottom:60px;}
+  a{color:inherit;}
+  h1,h2,h3{margin:0 0 6px 0;font-weight:800;letter-spacing:.2px;color:var(--navy);}
+  h1{font-size:1.5rem;} h2{font-size:1.2rem;} h3{font-size:1rem;}
+  p{margin:4px 0;color:var(--muted);}
+  .topbar{display:flex;align-items:center;justify-content:space-between;
+    padding:14px 20px;background:var(--panel);border-bottom:3px solid var(--yellow);
+    position:sticky;top:0;z-index:20;box-shadow:0 2px 10px rgba(18,58,99,.06);}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:900;font-size:1.05rem;color:var(--navy);}
+  .brand .dot{width:12px;height:12px;background:var(--red);border-radius:3px;}
+  .topbar .who{font-size:.85rem;color:var(--muted);display:flex;gap:10px;align-items:center;}
+  .btn{border:1px solid var(--line);background:var(--panel2);color:var(--navy);
+    padding:9px 14px;border-radius:var(--radius);cursor:pointer;font-size:.9rem;
+    font-weight:600;transition:transform .08s ease,border-color .12s ease;}
+  .btn:hover{border-color:var(--yellow);background:var(--yellow-dim);}
+  .btn:active{transform:scale(.97);}
+  .btn-primary{background:var(--yellow);color:var(--navy);border-color:var(--yellow);font-weight:800;}
+  .btn-primary:hover{filter:brightness(1.04);background:var(--yellow);}
+  .btn-danger{background:var(--red);color:#fff;border-color:var(--red);}
+  .btn-danger:hover{background:#c81c14;border-color:#c81c14;}
+  .btn-ghost{background:transparent;border-color:transparent;}
+  .btn-sm{padding:5px 10px;font-size:.78rem;}
+  .wrap{max-width:1100px;margin:0 auto;padding:22px 18px;}
+  .wrap-narrow{max-width:440px;margin:60px auto;padding:0 18px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:18px;margin-bottom:14px;box-shadow:0 2px 10px rgba(18,58,99,.05);}
+  .field{margin-bottom:12px;}
+  .field label{display:block;font-size:.78rem;color:var(--muted);margin-bottom:5px;
+    text-transform:uppercase;letter-spacing:.06em;}
+  .field input,.field select,.field textarea{width:100%;padding:10px 12px;
+    background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--ink);
+    font-size:.95rem;}
+  .field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--yellow);background:#fff;}
+  .row{display:flex;gap:10px;flex-wrap:wrap;}
+  .row > *{flex:1;min-width:140px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:10px;}
+  .id-tile{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+    padding:14px 6px;text-align:center;cursor:pointer;font-weight:800;font-size:1.1rem;color:var(--navy);}
+  .id-tile:hover{border-color:var(--yellow);background:var(--yellow-dim);}
+  .id-tile.done{border-color:var(--green);background:#E6F7EB;color:#1c7a3a;}
+  .tag{display:inline-block;padding:2px 9px;border-radius:20px;font-size:.72rem;
+    font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
+  .tag-rot{background:var(--red);color:#fff;}
+  .tag-gelb{background:var(--gelb);color:#241f00;}
+  .tag-gruen{background:var(--green);color:#fff;}
+  .tag-blau{background:var(--blue);color:#fff;}
+  .tag-schwarz{background:var(--black);color:#fff;}
+  .tag-status{background:var(--panel2);color:var(--muted);border:1px solid var(--line);}
+  .divider{height:1px;background:var(--line);margin:16px 0;}
+  .section-title{font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;
+    color:var(--navy);margin:22px 0 8px 0;font-weight:800;border-left:4px solid var(--yellow);padding-left:9px;}
+  table{width:100%;border-collapse:collapse;font-size:.88rem;}
+  th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);}
+  th{color:var(--muted);font-weight:700;font-size:.75rem;text-transform:uppercase;}
+  tr:hover td{background:var(--panel2);}
+  .value-box{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+    padding:10px 12px;margin-bottom:8px;}
+  .value-box .lbl{font-size:.72rem;color:var(--muted);text-transform:uppercase;
+    letter-spacing:.05em;margin-bottom:3px;}
+  .value-box .val{font-size:.95rem;color:var(--ink);}
+  .timer-btn{background:var(--panel);border:1px solid var(--line);color:var(--navy);
+    padding:6px 12px;border-radius:7px;cursor:pointer;font-weight:700;font-size:.82rem;}
+  .timer-btn:hover{border-color:var(--yellow);background:var(--yellow-dim);}
+  .pending{color:var(--amber);font-style:italic;font-size:.85rem;}
+  .vitals-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;}
+  .cat-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;}
+  .cat-btn{flex:1;min-width:80px;padding:16px 6px;border-radius:10px;border:3px solid transparent;
+    font-weight:900;text-align:center;cursor:pointer;font-size:.95rem;letter-spacing:.03em;}
+  .cat-btn.rot{background:var(--red);color:#fff;}
+  .cat-btn.gelb{background:var(--gelb);color:#241f00;}
+  .cat-btn.gruen{background:var(--green);color:#fff;}
+  .cat-btn.blau{background:var(--blue);color:#fff;}
+  .cat-btn.schwarz{background:var(--black);color:#fff;}
+  .cat-btn.selected{border-color:var(--navy);box-shadow:0 0 0 2px var(--navy) inset;}
+  .toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);background:var(--navy);
+    color:#fff;padding:8px 16px;border-radius:8px;font-weight:700;font-size:.85rem;z-index:100;
+    box-shadow:0 4px 14px rgba(18,58,99,.3);animation:fade 1.6s ease forwards;}
+  @keyframes fade{0%{opacity:0;transform:translate(-50%,-6px);}12%{opacity:1;transform:translate(-50%,0);}
+    80%{opacity:1;}100%{opacity:0;}}
+  .figure-wrap{display:flex;gap:18px;flex-wrap:wrap;}
+  .body-list{flex:1;min-width:220px;}
+  .body-part{display:flex;justify-content:space-between;gap:8px;padding:8px 10px;
+    border:1px solid var(--line);border-radius:7px;margin-bottom:6px;font-size:.85rem;}
+  .body-part.injured{border-color:var(--red);background:var(--red-dim);}
+  .body-part .pname{color:var(--muted);min-width:90px;}
+  .tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;}
+  .tab{padding:8px 16px;border-radius:8px;background:var(--panel2);cursor:pointer;
+    font-weight:700;font-size:.85rem;border:1px solid var(--line);color:var(--navy);}
+  .tab.active{background:var(--yellow);color:var(--navy);border-color:var(--yellow);}
+  .empty{color:var(--muted);text-align:center;padding:30px 0;font-size:.9rem;}
+  .modal-bg{position:fixed;inset:0;background:rgba(18,34,54,.5);display:flex;
+    align-items:center;justify-content:center;z-index:50;padding:16px;}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:22px;max-width:420px;width:100%;max-height:88vh;overflow:auto;
+    box-shadow:0 12px 40px rgba(18,58,99,.25);}
+  .close-x{float:right;cursor:pointer;color:var(--muted);font-size:1.2rem;}
+  .badge-role{background:var(--yellow);border:none;color:var(--navy);
+    padding:3px 10px;border-radius:20px;font-size:.72rem;font-weight:800;}
+  .match-ok{color:var(--green);font-weight:700;}
+  .match-bad{color:var(--red);font-weight:700;}
+  .small{font-size:.78rem;color:var(--muted);}
+  .flex-between{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;}
+  .chip{display:inline-flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--line);
+    padding:5px 12px;border-radius:20px;font-size:.78rem;margin:3px 6px 3px 0;color:var(--ink);}
+  .chip button{border:none;background:transparent;color:var(--red);cursor:pointer;font-weight:800;padding:0;}
+  .id-chip{font-weight:800;background:var(--yellow);color:var(--navy);padding:4px 14px;border-radius:8px;}
+  ::selection{background:var(--yellow);color:var(--navy);}
+  @media(max-width:600px){
+    .wrap{padding:14px 10px;}
+    h1{font-size:1.2rem;}
+    .topbar{padding:10px 12px;}
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* ====================== FIREBASE / FIRESTORE SETUP ======================
+   Trage hier die Konfiguration DEINES EIGENEN Firebase-Projekts ein.
+   Du findest sie in der Firebase-Konsole unter:
+   Projekteinstellungen (Zahnrad) -> "Deine Apps" -> Web-App -> "SDK-Setup und Konfiguration".
+   Siehe DEPLOYMENT.md, Schritt 2, für die genaue Anleitung. */
+const firebaseConfig = {
+  apiKey: "AIzaSyBHcG5nXpqxoIRsSAsruH7CslwbrhzPVaY",
+  authDomain: "manv-sichtungstrainer.firebaseapp.com",
+  projectId: "manv-sichtungstrainer",
+  storageBucket: "manv-sichtungstrainer.firebasestorage.app",
+  messagingSenderId: "175542139942",
+  appId: "1:175542139942:web:43add6cb59e21da4b53ae7"
+};
+const FIREBASE_CONFIGURED = !!(firebaseConfig.apiKey && firebaseConfig.projectId &&
+  firebaseConfig.apiKey.length > 30 && !/DEIN|YOUR|PLACEHOLDER/i.test(firebaseConfig.apiKey + firebaseConfig.projectId));
+let db = null;
+if(FIREBASE_CONFIGURED){
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
 }
 
-// Trennt eine frei eingegebene Liste von E-Mail-Adressen (Komma, Semikolon,
-// Zeilenumbruch oder Leerzeichen getrennt) und behält nur plausibel aussehende.
-function parseEmailList(raw) {
-  return (raw || "")
-    .split(/[,;\s\n]+/)
-    .map(s => s.trim())
-    .filter(s => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s));
+/* ====================== STORAGE HELPERS ======================
+   Jeder "key" (z.B. 'patients', 'users', 'exercises') entspricht einem Dokument
+   in der Firestore-Collection "appdata" (im echten Online-Betrieb) bzw. einem
+   Eintrag in window.storage (hier in der Claude-Vorschau) bzw., falls keines von
+   beidem verfügbar ist (z.B. lokal geöffnete Datei ohne eingetragenes Firebase-
+   Projekt), im localStorage des Browsers. So gehen Daten NIE mehr beim Neuladen
+   verloren — sobald ein echtes Firebase-Projekt eingetragen ist (empfohlen für
+   den echten Betrieb, siehe DEPLOYMENT.md), wird automatisch dieses genutzt. */
+const HAS_SANDBOX_STORAGE = (typeof window!=='undefined' && !!window.storage);
+const HAS_LOCALSTORAGE = (function(){
+  try{ const k='__mstart_test__'; localStorage.setItem(k,'1'); localStorage.removeItem(k); return true; }
+  catch(e){ return false; }
+})();
+const LS_PREFIX = 'mstart_appdata_';
+
+async function loadKey(key, fallback){
+  if(db){
+    try{
+      const doc = await db.collection('appdata').doc(key).get();
+      return doc.exists ? JSON.parse(doc.data().value) : fallback;
+    }catch(e){ console.error('Firestore load fehlgeschlagen', key, e); return fallback; }
+  }
+  if(HAS_SANDBOX_STORAGE){
+    try{
+      const r = await window.storage.get(key, true);
+      return r ? JSON.parse(r.value) : fallback;
+    }catch(e){ return fallback; }
+  }
+  if(HAS_LOCALSTORAGE){
+    try{
+      const raw = localStorage.getItem(LS_PREFIX+key);
+      return raw ? JSON.parse(raw) : fallback;
+    }catch(e){ return fallback; }
+  }
+  return fallback;
+}
+// Wie loadKey, unterscheidet aber ausdrücklich zwischen "erfolgreich gelesen, aber leer"
+// und "Lesezugriff fehlgeschlagen" (z.B. durch die gehärteten Firestore-Regeln blockiert).
+// Wichtig für die Ersteinrichtungs-Prüfung: ein blockierter Lesezugriff darf NIEMALS mit
+// "es gibt noch keine Nutzer" verwechselt werden — sonst würde ein reines
+// Konfigurationsproblem (Server-Funktion nicht erreichbar + gehärtete Regeln aktiv) dazu
+// führen, dass die App fälschlich die Ersteinrichtung statt der normalen Anmeldung zeigt
+// und dadurch NIEMAND mehr ins System kommt.
+async function checkLocalUsersState(){
+  if(db){
+    try{ const doc = await db.collection('appdata').doc('users').get(); return {ok:true, empty:!doc.exists}; }
+    catch(e){ return {ok:false, empty:false}; }
+  }
+  if(HAS_SANDBOX_STORAGE){
+    try{ const r = await window.storage.get('users', true); return {ok:true, empty:!r}; }
+    catch(e){ return {ok:false, empty:false}; }
+  }
+  if(HAS_LOCALSTORAGE){
+    try{ const raw = localStorage.getItem(LS_PREFIX+'users'); return {ok:true, empty:!raw}; }
+    catch(e){ return {ok:false, empty:false}; }
+  }
+  return {ok:true, empty:true};
+}
+async function saveKey(key, value){
+  if(db){
+    try{ await db.collection('appdata').doc(key).set({value: JSON.stringify(value), updatedAt: Date.now()}); }
+    catch(e){ console.error('storage save failed', key, e); }
+    return;
+  }
+  if(HAS_SANDBOX_STORAGE){
+    try{ await window.storage.set(key, JSON.stringify(value), true); }
+    catch(e){ console.error('storage save failed', key, e); }
+    return;
+  }
+  if(HAS_LOCALSTORAGE){
+    try{ localStorage.setItem(LS_PREFIX+key, JSON.stringify(value)); }
+    catch(e){ console.error('storage save failed', key, e); }
+  }
+}
+// Wie saveKey, aber mit einem automatischen zweiten Versuch bei transienten Serverfehlern
+// und einem Rückgabewert, damit der Aufrufer echte Fehlschläge erkennen kann.
+async function saveKeyRetry(key, value){
+  if(!db && !HAS_SANDBOX_STORAGE && !HAS_LOCALSTORAGE) return false;
+  for(let attempt=1; attempt<=2; attempt++){
+    try{
+      if(db){ await db.collection('appdata').doc(key).set({value: JSON.stringify(value), updatedAt: Date.now()}); }
+      else if(HAS_SANDBOX_STORAGE){ await window.storage.set(key, JSON.stringify(value), true); }
+      else{ localStorage.setItem(LS_PREFIX+key, JSON.stringify(value)); }
+      return true;
+    }catch(e){
+      console.error('storage save failed (Versuch '+attempt+')', key, e);
+      if(attempt<2) await new Promise(r=>setTimeout(r,400));
+    }
+  }
+  return false;
 }
 
-function buildDebriefingPdf(data) {
-  return new Promise((resolve, reject) => {
-    try {
-      const doc = new PDFDocument({ size: "A4", layout: "portrait", margin: 50 });
-      const chunks = [];
-      doc.on("data", c => chunks.push(c));
-      doc.on("end", () => resolve(Buffer.concat(chunks)));
-      doc.on("error", reject);
+/* ====================== GLOBAL STATE ====================== */
+const St = {
+  user:null,          // currently logged in user object (session only, resets on reload)
+  route:'login',
+  users:{},           // username -> user object
+  patients:[],        // array of patient objects
+  exercises:[],        // array of exercise objects
+  sichtungen:{},       // exerciseId -> array of sichtung records
+  currentExerciseId:null,
+  currentRole:null,
+  currentPatientId:null,
+  patientOpenedAtMs:null,
+  authToken:null,
+  pendingVerifyUsername:null,
+  resetToken:null,
+  selectedBodyPart:null,
+  reveal:{},           // fieldKey -> true, reset per patient view
+  timer:{active:false,field:null,remaining:0,intervalId:null},
+  adminTab:'patienten',
+  leiterTab:'uebungen',
+  cockpitLog:[],
+  aiBusy:false,
+  aiProgress:'',
+  aiLastError:null,
+  pendingDeepLink:null,
+  deepLinkPatientAfterJoin:null,
+  qrExerciseId:null
+};
 
-      const navy = "#123A63", muted = "#5C6B84";
-      const pageBottom = doc.page.height - 50;
+const CATS = ['rot','gelb','gruen','blau','schwarz'];
+const CAT_LABEL = {rot:'Rot',gelb:'Gelb',gruen:'Grün',blau:'Blau',schwarz:'Schwarz'};
+// Spiegelt PROTECTED_ADMIN_USERNAME aus auth.js: rein für die Client-UI (z.B. Rollen-Dropdown
+// sperren, Löschen-Button ausblenden). Die eigentliche, verbindliche Absicherung erfolgt
+// serverseitig in auth.js — diese Konstante ist nur eine zusätzliche UX-/Fallback-Schicht.
+const PROTECTED_ADMIN_USERNAME = 'Martin';
+const PRESET_ROLES = ['1. RTW','2. RTW','3. RTW','4. RTW','5. RTW','1. NEF','2. NEF','3. NEF','4. NEF','5. NEF',
+  'LNA','OrgL','GW San','AB ManV','BHP 50','BTP 500'];
 
-      function ensureSpace(needed) {
-        if (doc.y + needed > pageBottom) doc.addPage();
+function uid(){ return Math.random().toString(36).slice(2,9); }
+
+/* ====================== PASSWORT-SICHERHEIT ======================
+   Passwörter werden NICHT im Klartext gespeichert, sondern nur als gesalzener SHA-256-Hash
+   (über die im Browser eingebaute Web-Crypto-API, ohne externe Bibliothek). Selbst wer direkten
+   Lesezugriff auf die Datenbank bekommt, sieht damit keine echten Passwörter — nur unbrauchbare
+   Hash-Werte. Bereits bestehende Konten mit altem Klartext-Passwort werden beim nächsten
+   erfolgreichen Login automatisch und unbemerkt auf das neue, sichere Format umgestellt. */
+async function sha256Hex(text){
+  const enc = new TextEncoder().encode(text);
+  const hashBuf = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(hashBuf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function randomSalt(){
+  const arr = new Uint8Array(16);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function setPasswordHash(userObj, plainPassword){
+  const salt = randomSalt();
+  userObj.salt = salt;
+  userObj.passwordHash = await sha256Hex(salt+':'+plainPassword);
+  delete userObj.password; // altes Klartextfeld entfernen, falls vorhanden
+}
+async function verifyPassword(userObj, plainPassword){
+  if(userObj.passwordHash && userObj.salt){
+    return (await sha256Hex(userObj.salt+':'+plainPassword)) === userObj.passwordHash;
+  }
+  if(userObj.password !== undefined){
+    return userObj.password === plainPassword; // Alt-Konto ohne Hash (wird bei Erfolg migriert)
+  }
+  return false;
+}
+function nowStamp(){ return new Date().toLocaleString('de-DE'); }
+
+/* ====================== SERVER-AUTH (sicher) MIT LOKALEM FALLBACK ======================
+   Ruft die serverseitige Funktion netlify/functions/auth.js auf, die Passwörter gehasht
+   auf dem Server hält und niemals im Browser sichtbar macht. Ist die Funktion (noch) nicht
+   eingerichtet (siehe DEPLOYMENT.md), liefert sie eine erkennbare "nicht konfiguriert"-
+   Meldung — in diesem Fall greift die App automatisch auf die einfachere, rein clientseitige
+   Absicherung (siehe setPasswordHash/verifyPassword) zurück, damit Login/Registrierung immer
+   funktionieren. E-Mail-Verifizierung ist NUR über die Server-Funktion möglich. */
+const AUTH_API = '/.netlify/functions/auth';
+const CERT_API = '/.netlify/functions/certificate';
+async function callCertificateApi(payload){
+  return callCertificateApiGeneric(CERT_API, payload);
+}
+// Wie callCertificateApi, aber für eine beliebige Server-Funktions-URL nutzbar
+// (z.B. /.netlify/functions/debriefing-pdf für den Protokoll-Mailversand).
+async function callCertificateApiGeneric(url, payload){
+  let httpStatus = null, rawText = '';
+  try{
+    const resp = await fetch(url, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+    httpStatus = resp.status;
+    rawText = await resp.text();
+    try{
+      return JSON.parse(rawText);
+    }catch(parseErr){
+      const fnName = url.split('/').pop();
+      console.error('Server-API: ungültige Antwort', url, httpStatus, rawText.slice(0,500));
+      return { ok:false, error:`Server-Funktion antwortete unerwartet (HTTP ${httpStatus}). ${httpStatus===404?`Die Funktion "${fnName}" wurde auf dem Server nicht gefunden — ist netlify/functions/${fnName}.js im Repo enthalten und deployt?`:'Rohantwort: '+rawText.slice(0,200)}` };
+    }
+  }catch(e){
+    console.error('Server-API nicht erreichbar', url, e);
+    return { ok:false, error:'Server-Funktion ist nicht erreichbar (Netzwerkfehler). Technisches Detail: '+e.message };
+  }
+}
+async function callAuthApi(payload){
+  try{
+    const resp = await fetch(AUTH_API, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+    const rawText = await resp.text();
+    let data;
+    try{
+      data = JSON.parse(rawText);
+    }catch(parseErr){
+      // Die Funktion hat geantwortet, aber kein gültiges JSON zurückgegeben — meist ein
+      // Zeichen dafür, dass die Funktion beim Start abgestürzt ist (z.B. fehlerhafte
+      // FIREBASE_SERVICE_ACCOUNT_JSON) oder gar nicht existiert (404).
+      console.error('Auth-API: ungültige Antwort', resp.status, rawText.slice(0,500));
+      return { ok:false, error:`Server-Funktion antwortete unerwartet (HTTP ${resp.status}). ${resp.status===404?'Die Funktion "auth" wurde nicht gefunden — ist netlify/functions/auth.js deployt?':'Rohantwort: '+rawText.slice(0,200)}` };
+    }
+    if(data && data.ok===false && /Server nicht konfiguriert/i.test(data.error||'')){
+      return null; // Signal: Fallback auf lokale Absicherung nutzen
+    }
+    return data;
+  }catch(e){
+    console.error('Auth-API nicht erreichbar, nutze lokalen Fallback', e);
+    return null;
+  }
+}
+function saveAuthToken(token){
+  if(!HAS_LOCALSTORAGE) return;
+  try{ token ? localStorage.setItem('mstart_auth_token', token) : localStorage.removeItem('mstart_auth_token'); }catch(e){}
+}
+function loadAuthToken(){
+  if(!HAS_LOCALSTORAGE) return null;
+  try{ return localStorage.getItem('mstart_auth_token'); }catch(e){ return null; }
+}
+
+function toast(msg){
+  const t=document.createElement('div');
+  t.className='toast'; t.textContent=msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.remove(),1700);
+}
+
+/* ====================== INIT / SEED ====================== */
+// WICHTIG: Die Anmeldung wird bewusst NICHT über den URL-Hash (#u=...) gemerkt, sondern über
+// localStorage. Der URL-Hash ist an die AKTUELLE Tab-URL gebunden — scannt ein Teilnehmer einen
+// QR-Code, öffnet sich eine KOMPLETT NEUE URL (z.B. .../?pid=12) ohne diesen Hash, wodurch die
+// Anmeldung verloren ginge. localStorage ist an den Browser/das Gerät gebunden, nicht an eine
+// bestimmte URL, und übersteht daher auch eine neue Navigation durch einen QR-Scan.
+// Gespeichert wird das GESAMTE (unkritische) Profil, nicht nur der Benutzername — damit die
+// Sitzung auch dann wiederhergestellt werden kann, wenn der direkte Lesezugriff auf die
+// Nutzerdatenbank serverseitig gesperrt ist (siehe DEPLOYMENT.md, gehärtete Firestore-Regeln)
+// und Login ausschließlich über die Server-Funktion läuft.
+const LS_LOGIN_KEY = 'mstart_login_profile';
+function saveLoginSession(userObj, token){
+  if(!HAS_LOCALSTORAGE) return;
+  try{
+    localStorage.setItem(LS_LOGIN_KEY, JSON.stringify({
+      username:userObj.username, email:userObj.email, role:userObj.role, locked:!!userObj.locked
+    }));
+  }catch(e){}
+  saveAuthToken(token || null);
+}
+function restoreLoginSession(){
+  if(!HAS_LOCALSTORAGE) return null;
+  try{
+    const raw = localStorage.getItem(LS_LOGIN_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+function clearLoginSession(){
+  if(!HAS_LOCALSTORAGE) return;
+  try{ localStorage.removeItem(LS_LOGIN_KEY); }catch(e){}
+  saveAuthToken(null);
+}
+// Merkt sich zusätzlich zum Login auch die aktuell beigetretene Übung + Rolle im Browser
+// (localStorage), damit ein QR-Code-Scan in einem neuen Tab/einer neuen Kamera-App-Session
+// die laufende Übung sofort wiedererkennt, statt jedes Mal neu beitreten zu müssen.
+const LS_SESSION_KEY = 'mstart_session_context';
+function saveExerciseSession(){
+  if(!HAS_LOCALSTORAGE || !St.user) return;
+  try{
+    localStorage.setItem(LS_SESSION_KEY, JSON.stringify({
+      username: St.user.username, exerciseId: St.currentExerciseId, role: St.currentRole
+    }));
+  }catch(e){}
+}
+function restoreExerciseSession(){
+  if(!HAS_LOCALSTORAGE || !St.user) return;
+  try{
+    const raw = localStorage.getItem(LS_SESSION_KEY);
+    if(!raw) return;
+    const s = JSON.parse(raw);
+    if(s.username !== St.user.username) return;
+    const ex = St.exercises.find(e=>e.id===s.exerciseId);
+    if(ex && ex.participants[St.user.username]){
+      St.currentExerciseId = s.exerciseId;
+      St.currentRole = ex.participants[St.user.username];
+    }
+  }catch(e){}
+}
+function clearExerciseSession(){
+  if(!HAS_LOCALSTORAGE) return;
+  try{ localStorage.removeItem(LS_SESSION_KEY); }catch(e){}
+}
+
+async function init(){
+  // QR-Code-Deep-Link aus der URL lesen: enthält nur noch eine FESTE Patienten-ID
+  // (z.B. ?pid=12) — unabhängig von einer bestimmten Übung, damit gedruckte
+  // QR-Codes für beliebig viele zukünftige Übungen wiederverwendet werden können.
+  const params = new URLSearchParams(location.search);
+  if(params.get('pid')){
+    St.pendingDeepLink = {pid: parseInt(params.get('pid'))};
+  }
+  if(params.get('resetToken')){
+    St.resetToken = params.get('resetToken');
+  }
+
+  // Lokaler Nutzer-Cache: dient nur noch dem Fallback-Betrieb (ohne eingerichtete
+  // Server-Auth-Funktion bzw. vor dem Aktivieren der gehärteten Firestore-Regeln).
+  // Ist die Server-Funktion aktiv, bleibt dieser Cache leer/ungenutzt für den Login
+  // selbst — die eigentliche Nutzerdatenbank liegt dann ausschließlich serverseitig.
+  St.users = (await loadKey('users', null)) || {};
+
+  St.patients = await loadKey('patients', null);
+  if(!St.patients){
+    St.patients = seedPatients();
+    await saveKey('patients', St.patients);
+  }
+  St.exercises = await loadKey('exercises', []);
+  const sichtRaw = await loadKey('sichtungen_index', {});
+  St.sichtungen = sichtRaw;
+
+  // Prüfen, ob überhaupt schon ein Konto existiert. Es gibt bewusst KEIN im Quelltext
+  // hinterlegtes Standard-Konto mehr (frühere Version: "Martin"/"1234") — beim allerersten
+  // Start muss die Person mit Hosting-/Deploy-Zugriff selbst ein Admin-Konto anlegen.
+  const setupCheck = await callAuthApi({action:'checkSetup'});
+  let needsSetup = false;
+  if(setupCheck){ // Server-Auth aktiv und erreichbar -> dessen Aussage ist verbindlich
+    needsSetup = !!setupCheck.needsSetup;
+  }else{
+    // Fallback: keine Server-Funktion konfiguriert/erreichbar. NUR wenn der lokale
+    // Lesezugriff selbst eindeutig erfolgreich war UND leer ist, gilt "Ersteinrichtung
+    // nötig". Schlägt der Lesezugriff fehl (z.B. durch gehärtete Firestore-Regeln bei
+    // gleichzeitig nicht erreichbarer Server-Funktion), zeigen wir stattdessen die ganz
+    // normale Anmeldung — ein reines Konfigurationsproblem darf niemals dazu führen,
+    // dass sich niemand mehr einloggen kann.
+    const localState = await checkLocalUsersState();
+    needsSetup = localState.ok && localState.empty;
+  }
+
+  if(needsSetup){
+    St.route = 'setup';
+    render();
+    return;
+  }
+
+  // Login-Session wiederherstellen (localStorage — übersteht auch eine neue URL durch QR-Scan).
+  // Das gespeicherte Profil wird direkt genutzt, unabhängig davon, ob St.users (lokaler
+  // Fallback-Cache) überhaupt gefüllt werden darf.
+  const savedProfile = restoreLoginSession();
+  const savedToken = loadAuthToken();
+  if(savedProfile && !savedProfile.locked){
+    St.user = savedProfile;
+    St.authToken = savedToken;
+    St.users[savedProfile.username] = savedProfile; // für Anzeigezwecke im lokalen Cache spiegeln
+    St.route = savedProfile.role==='admin' ? 'admin' : 'exercises';
+    restoreExerciseSession();
+  }else if(savedProfile && savedProfile.locked){
+    clearLoginSession();
+  }
+
+  if(St.user){ tryHandleDeepLink(); }
+  render();
+  setupRealtimeSync();
+}
+
+// ====================== ECHTZEIT-SYNC FÜRS ÜBUNGSLEITER-COCKPIT ======================
+// Damit neu eingehende Sichtungsergebnisse (und Statusänderungen der Übung) im Cockpit
+// erscheinen, OHNE dass die Seite manuell neu geladen werden muss.
+let LAST_SICHT_JSON = null;
+let LAST_EX_JSON = null;
+
+function setupRealtimeSync(){
+  LAST_SICHT_JSON = JSON.stringify(St.sichtungen);
+  LAST_EX_JSON = JSON.stringify(St.exercises);
+
+  if(db){
+    // Echte Echtzeit-Updates über Firestore — Änderungen erscheinen praktisch sofort,
+    // auch wenn sie von einem anderen Gerät/Teilnehmer stammen.
+    db.collection('appdata').doc('sichtungen_index').onSnapshot(doc=>{
+      if(doc.exists){
+        try{ St.sichtungen = JSON.parse(doc.data().value); }catch(e){}
+        if(St.route==='cockpit') render();
       }
-      function heading(text) {
-        ensureSpace(30);
-        doc.moveDown(0.5).fillColor(navy).font("Helvetica-Bold").fontSize(15).text(text);
-        doc.moveTo(50, doc.y + 2).lineTo(doc.page.width - 50, doc.y + 2).strokeColor("#D9C27A").lineWidth(1).stroke();
-        doc.moveDown(0.5);
+    }, err=>console.error('Sichtungen-Live-Sync Fehler', err));
+    db.collection('appdata').doc('exercises').onSnapshot(doc=>{
+      if(doc.exists){
+        try{ St.exercises = JSON.parse(doc.data().value); }catch(e){}
+        if(St.route==='cockpit') render();
       }
-      function kvRow(label, value) {
-        if (!value) return;
-        ensureSpace(18);
-        doc.fillColor(muted).font("Helvetica-Bold").fontSize(9).text(label, { continued: false });
-        doc.fillColor("#1B2A41").font("Helvetica").fontSize(11).text(String(value));
-        doc.moveDown(0.3);
-      }
+    }, err=>console.error('Übungen-Live-Sync Fehler', err));
+  }else{
+    // Fallback ohne Firebase (Claude-Vorschau oder localStorage-Betrieb ohne echtes
+    // Backend): regelmäßiges, dezentes Nachschauen, während das Cockpit geöffnet ist.
+    setInterval(async ()=>{
+      if(St.route!=='cockpit') return;
+      const [sicht, ex] = await Promise.all([loadKey('sichtungen_index', {}), loadKey('exercises', [])]);
+      const sJson = JSON.stringify(sicht), eJson = JSON.stringify(ex);
+      let changed = false;
+      if(sJson!==LAST_SICHT_JSON){ St.sichtungen = sicht; LAST_SICHT_JSON = sJson; changed = true; }
+      if(eJson!==LAST_EX_JSON){ St.exercises = ex; LAST_EX_JSON = eJson; changed = true; }
+      if(changed) render();
+    }, 3000);
+  }
+}
 
-      doc.fillColor(navy).font("Helvetica-Bold").fontSize(22).text(`Debriefing: ${data.exName}`);
-      doc.fillColor(muted).font("Helvetica").fontSize(10)
-        .text(`Szenario: ${data.scenario || "-"}${data.meta ? " · " + data.meta : ""}`);
-      doc.text(`Status: ${data.status || "-"} · Exportiert: ${new Date().toLocaleString("de-DE")}`);
-      doc.moveDown(0.5);
+// Prüft, ob ein QR-Deep-Link (feste Patienten-ID) ansteht, und öffnet ggf. direkt die
+// passende Sichtungsseite — vorausgesetzt, der Nutzer ist bereits einer Übung beigetreten
+// (sonst wird er zuerst zur Übungsauswahl geschickt und landet danach automatisch beim Patienten).
+function tryHandleDeepLink(){
+  if(!St.pendingDeepLink || !St.user) return false;
+  const {pid} = St.pendingDeepLink;
+  const patient = St.patients.find(p=>p.id===pid);
+  if(!patient){ toast('Kein Patient mit dieser ID gefunden'); St.pendingDeepLink=null; return false; }
+  St.pendingDeepLink = null;
+  if(St.currentExerciseId && St.currentRole){
+    openPatient(pid);
+  }else{
+    St.deepLinkPatientAfterJoin = pid;
+    toast('Bitte zuerst einer laufenden Übung beitreten — danach geht es automatisch zum gescannten Patienten weiter.');
+    go('exercises');
+  }
+  return true;
+}
 
-      if (data.briefingFields && data.briefingFields.length) {
-        heading("Einsatzdaten");
-        data.briefingFields.forEach(([k, v]) => kvRow(k, v));
-      }
+/* ====================== BASIS-PATIENTENDATENBANK (100 Patienten, lokal generiert) ======================
+   Läuft komplett ohne API-Aufruf (kostenlos, sofort, kein Rate-Limit). Erzeugt genau 100 Patienten nach
+   folgenden festen Quoten:
+   - Alter: 5% Baby, 5% Kleinkind, 5% Schulkind, 85% Erwachsene
+   - Namensherkunft: 10% ausländisch, 90% deutsch
+   - mSTaRT-Kategorie: ca. 1/3 Rot+Blau+Schwarz (davon größtenteils Rot), 1/3 Gelb, 1/3 Grün
+     (Kinder erhalten aus Gründen der Angemessenheit nur Gelb/Grün, nie Blau/Schwarz/Rot) */
 
-      heading("Chronologischer Verlauf");
-      if (!data.timeline || !data.timeline.length) {
-        doc.fillColor("#888").font("Helvetica-Oblique").fontSize(10).text("Keine Ereignisse erfasst");
-      } else {
-        const colTimeW = 130, colEventW = doc.page.width - 100 - colTimeW;
-        data.timeline.forEach(entry => {
-          ensureSpace(20);
-          const y = doc.y;
-          doc.fillColor(muted).font("Helvetica").fontSize(9).text(entry.time || "", 50, y, { width: colTimeW });
-          doc.fillColor("#1B2A41").font("Helvetica").fontSize(10).text(entry.text || "", 50 + colTimeW, y, { width: colEventW });
-          doc.moveDown(0.35);
+function jitter(base, pct){ const delta = base*(pct||0.1)*(Math.random()*2-1); return Math.round(base+delta); }
+function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+const NAME_POOLS = {
+  deMaleFirst:['Jonas','Lukas','Finn','Paul','Felix','Maximilian','Leon','Niklas','Tobias','Simon','Julian','Jan','David','Sebastian','Christian','Michael','Thomas','Stefan','Andreas','Martin','Peter','Klaus','Werner','Hans','Wolfgang','Manfred','Dieter','Uwe','Frank','Matthias'],
+  deFemaleFirst:['Emma','Mia','Hannah','Lea','Lena','Laura','Sophie','Marie','Julia','Anna','Sarah','Nina','Katharina','Christina','Sabine','Petra','Andrea','Susanne','Claudia','Monika','Ingrid','Ursula','Renate','Gisela','Erika','Brigitte','Helga','Christa','Marion','Karin'],
+  deLast:['Müller','Schmidt','Schneider','Fischer','Weber','Meyer','Wagner','Becker','Schulz','Hoffmann','Koch','Bauer','Richter','Klein','Wolf','Neumann','Schwarz','Zimmermann','Braun','Krüger','Hofmann','Hartmann','Lange','Werner','Schmitt','Krause','Meier','Lehmann','Huber','Kaiser'],
+  foreignMaleFirst:['Mehmet','Ahmed','Ali','Yusuf','Emre','Kacper','Piotr','Mateusz','Oleksandr','Andriy','Dmytro','Luca','Matteo','Giovanni','Rashid','Karim','Omar','Youssef','Bogdan','Ivan'],
+  foreignFemaleFirst:['Fatma','Aylin','Zeynep','Elif','Katarzyna','Agnieszka','Olena','Kateryna','Sofia','Giulia','Amira','Layla','Noor','Ioana','Andreea','Natalia'],
+  foreignLast:['Yılmaz','Demir','Kaya','Şahin','Nowak','Kowalski','Wiśniewski','Kovalenko','Shevchenko','Bondarenko','Rossi','Ferrari','Romano','Hassan','Ibrahim','Popescu','Ionescu','Petrenko']
+};
+
+function pickUniqueName(origin, gender, usedNames){
+  const firstPool = origin==='auslaendisch'
+    ? (gender==='männlich' ? NAME_POOLS.foreignMaleFirst : NAME_POOLS.foreignFemaleFirst)
+    : (gender==='männlich' ? NAME_POOLS.deMaleFirst : NAME_POOLS.deFemaleFirst);
+  const lastPool = origin==='auslaendisch' ? NAME_POOLS.foreignLast : NAME_POOLS.deLast;
+  let name, tries=0;
+  do{
+    name = pick(firstPool)+' '+pick(lastPool);
+    tries++;
+  }while(usedNames.has(name) && tries<200);
+  usedNames.add(name);
+  return name.split(' ');
+}
+
+// Basis-Baustein: unspezifizierte Felder bekommen sinnvolle Standardwerte, sodass jedes Template
+// nur die abweichenden Felder angeben muss.
+function mkBase(cat, f){
+  return {
+    kategorieReal: cat,
+    // "typ" klassifiziert den Patienten grob nach Ereignisart, damit bei der Übungserstellung
+    // nur thematisch passende Patienten aus der Datenbank gezogen werden (z.B. keine
+    // Durchfallerkrankung bei einer Explosion). Alle mitgelieferten Standard-Templates sind
+    // Trauma-/Verletzungsfälle; per KI generierte Zusatzpatienten bekommen ihren Typ passend
+    // zum jeweils eingegebenen Szenario zugewiesen (siehe classifyScenario()).
+    typ: f.typ || 'trauma',
+    ersteindruck: f.ersteindruck,
+    // WICHTIG: Nur die Kategorie "grün" ist per mSTaRT-Definition gehfähig. Alle anderen
+    // Kategorien sind standardmäßig NICHT gehfähig, außer ein Template gibt explizit eine
+    // abweichende (aber weiterhin nicht-plain-"gehfähig") Formulierung vor.
+    gehfaehigkeit: f.gehfaehigkeit || (cat==='gruen' ? 'gehfähig' : 'nicht gehfähig'),
+    befunde: f.befunde,
+    koerper: Object.assign({kopf:'',thoraxVorne:'',thoraxHinten:'',armLinks:'',armRechts:'',beinLinks:'',beinRechts:''}, f.koerper||{}),
+    xabcde: Object.assign({X:'Keine kritische Blutung',A:'Frei, ansprechbar',B:'unauffällig',C:'unauffällig',D:'wach, orientiert, GCS 15',E:'keine weiteren Auffälligkeiten'}, f.xabcde||{}),
+    sampler: Object.assign({S:'-',A:'Keine bekannt',M:'Keine Dauermedikation',P:'Keine relevanten Vorerkrankungen',L:'vor ca. 2-4 Std.',E:'-',R:'Keine besonderen Risikofaktoren'}, f.sampler||{}),
+    vitals: Object.assign({puls:'-',blutdruck:'-',rekap:'<2 Sek.',af:'-',spo2:'-',bz:'nicht ermittelbar',temp:jitter(367,0.01)/10+'°C',etco2:'nicht ermittelbar',hb:'nicht ermittelbar',co:'nicht ermittelbar',spmet:'nicht ermittelbar'}, f.vitals||{}),
+    scores: Object.assign({gcs:'15',befast:'unauffällig',news2:'nicht ermittelbar',nexus:'nicht relevant',qsofa:'0',spesi:'nicht ermittelbar',wells:'nicht ermittelbar',apgar:'nicht ermittelbar'}, f.scores||{})
+  };
+}
+
+// ---- Erwachsene: ROT ----
+const TPL_ERW_ROT = [
+  ()=>{ const side=pick(['linken','rechten']); const p=jitter(128,0.1), bd=jitter(95,0.08);
+    return mkBase('rot',{ersteindruck:`Patient liegt auf dem Boden, schreit vor Schmerzen und hält sich den ${side} Oberschenkel.`,
+    gehfaehigkeit:'nicht gehfähig', befunde:`Starke, spritzende Blutung am ${side} Oberschenkel, deutliche Fehlstellung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Offene Fraktur, spritzende arterielle Blutung'},
+    xabcde:{X:`Spritzende arterielle Blutung ${side} Oberschenkel`,B:`AF ${jitter(22,0.1)}/min, symmetrisch`,C:`Puls ${p}/min, blass, kaltschweißig`,D:`Wach, starke Schmerzen`},
+    sampler:{S:'Starke Schmerzen, NRS 9/10',E:'Sturz aus Höhe'},
+    vitals:{puls:p+'/min',blutdruck:bd+'/60 mmHg',rekap:'3 Sek.',af:jitter(22,0.1)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{news2:'6',qsofa:'1'}});},
+  ()=>{ const p=jitter(132,0.08);
+    return mkBase('rot',{ersteindruck:'Patient sitzt gekrümmt am Boden, ringt sichtlich nach Luft, deutliche Zyanose der Lippen.',
+    befunde:'Einseitig abgeschwächtes Atemgeräusch, gestaute Halsvenen, zunehmende Atemnot.',
+    koerper:{thoraxVorne:'Prellmarke, hypersonorer Klopfschall re.'},
+    xabcde:{B:`AF ${jitter(30,0.1)}/min, einseitig abgeschwächt, hypersonor`,C:`Puls ${p}/min, RR fallend`,D:'Unruhig, zunehmend somnolent'},
+    sampler:{E:'Sturz gegen Geländer, Thoraxanprall'},
+    vitals:{puls:p+'/min',blutdruck:jitter(88,0.08)+'/58 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(85,0.03)+'%',rekap:'3 Sek.'},
+    scores:{news2:'8',gcs:'13'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient liegt regungslos neben umgestürztem Fahrrad, blutet aus einer Kopfwunde.',
+    befunde:'Große Platzwunde am Hinterkopf, wiederholtes Erbrechen, verzögerte Reaktion auf Ansprache.',
+    koerper:{kopf:'Große Platzwunde, Schwellung, Blutung'},
+    xabcde:{B:`AF ${jitter(20,0.1)}/min`,C:`Puls ${jitter(96,0.08)}/min`,D:'Somnolent, GCS 12, wiederholtes Erbrechen'},
+    sampler:{S:'Kopfschmerzen, Übelkeit',E:'Fahrradsturz ohne Helm'},
+    vitals:{puls:jitter(96,0.08)+'/min',blutdruck:jitter(150,0.07)+'/95 mmHg',af:jitter(20,0.1)+'/min',spo2:jitter(95,0.02)+'%'},
+    scores:{gcs:'12',news2:'6'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient krümmt sich vor Schmerzen, hält sich den Bauch, blasse, kaltschweißige Haut.',
+    befunde:'Brettharter Bauch, deutliche Abwehrspannung, Kreislauf zunehmend instabil.',
+    xabcde:{C:`Puls ${jitter(122,0.08)}/min, RR fallend, blass`,D:'Wach, aber zunehmend unruhig'},
+    sampler:{S:'Starke Bauchschmerzen, diffus',E:'Sturz mit Anprall des Bauches an Gegenstand'},
+    vitals:{puls:jitter(122,0.08)+'/min',blutdruck:jitter(90,0.08)+'/60 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(95,0.02)+'%',rekap:'3 Sek.'},
+    scores:{qsofa:'2',news2:'7'}});},
+  ()=>{ const pct=jitter(30,0.15);
+    return mkBase('rot',{ersteindruck:'Patient liegt auf dem Rücken, Kleidung teils verbrannt, starke Schmerzen im Bereich von Rumpf und Armen.',
+    befunde:`Verbrennungen 2.-3. Grades an Rumpf und beiden Armen, ca. ${pct}% der Körperoberfläche.`,
+    koerper:{thoraxVorne:'Verbrennung 2.-3. Grades',armLinks:'Verbrennung 2. Grades',armRechts:'Verbrennung 2. Grades'},
+    xabcde:{B:`AF ${jitter(24,0.1)}/min`,C:`Puls ${jitter(118,0.08)}/min`,E:`Verbrennungen ca. ${pct}% KOF`},
+    sampler:{S:'Starke Schmerzen im Verbrennungsbereich',E:'Explosion/Stichflamme'},
+    vitals:{puls:jitter(118,0.08)+'/min',blutdruck:jitter(105,0.07)+'/70 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(96,0.02)+'%'},
+    scores:{news2:'5'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient liegt in instabiler Seitenlage, klagt über starke Schmerzen im Becken, kann Beine nicht bewegen.',
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:'Instabiles Becken bei Kompressionstest, deutliche Fehlstellung, Hämatom im Beckenbereich.',
+    xabcde:{C:`Puls ${jitter(126,0.08)}/min, RR grenzwertig`,D:'Wach, starke Schmerzen'},
+    sampler:{S:'Starke Schmerzen Becken, NRS 9/10',E:'Verschüttung/Sturz schwerer Gegenstand'},
+    vitals:{puls:jitter(126,0.08)+'/min',blutdruck:jitter(92,0.08)+'/60 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(94,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt neben eingeklemmter Maschine, ${side} Unterschenkel fehlt teilweise, starke Blutung.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Traumatische Amputation ${side} Unterschenkel, Blutung mittels Druckverband/Tourniquet teils kontrolliert.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Traumatische Amputation, Tourniquet angelegt'},
+    xabcde:{X:'Massive Blutung, Tourniquet vor Ort angelegt',C:`Puls ${jitter(134,0.08)}/min, blass`,D:'Wach, starke Schmerzen, ängstlich'},
+    sampler:{S:'Starke Schmerzen',E:'Einklemmung in Maschine'},
+    vitals:{puls:jitter(134,0.08)+'/min',blutdruck:jitter(88,0.08)+'/55 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(93,0.02)+'%',rekap:'4 Sek.'},
+    scores:{news2:'7'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient liegt benommen am Boden, hustet stark, Ruß im Gesicht sichtbar, Umgebung stark verraucht war.',
+    befunde:'Rußspuren um Mund und Nase, heisere Stimme, zunehmende Bewusstseinstrübung.',
+    koerper:{kopf:'Rußspuren um Mund/Nase'},
+    xabcde:{A:'Heisere Stimme, Verdacht auf Inhalationstrauma',B:`AF ${jitter(26,0.1)}/min`,C:`Puls ${jitter(120,0.08)}/min`,D:'Zunehmend somnolent, GCS 13'},
+    sampler:{S:'Hustenreiz, Kopfschmerzen',E:'Rauchgasexposition in geschlossenem Raum'},
+    vitals:{puls:jitter(120,0.08)+'/min',blutdruck:jitter(115,0.07)+'/75 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(89,0.03)+'%',co:jitter(18,0.15)+'%'},
+    scores:{gcs:'13',news2:'6'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient liegt verdreht zwischen Trümmerteilen, mehrere sichtbare Verletzungen an Armen und Beinen.',
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:'Multiple Frakturen und Prellungen, deutlich reduzierter Allgemeinzustand, Kreislauf grenzwertig.',
+    koerper:{armLinks:'Fraktur, Schwellung',beinRechts:'Fraktur, Fehlstellung'},
+    xabcde:{C:`Puls ${jitter(124,0.08)}/min, RR grenzwertig`,D:'Wach, verlangsamt reagierend'},
+    sampler:{S:'Starke Schmerzen an mehreren Körperstellen',E:'Sturz aus Höhe / Trümmerlage'},
+    vitals:{puls:jitter(124,0.08)+'/min',blutdruck:jitter(96,0.08)+'/62 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6',gcs:'14'}});},
+  ()=>{ return mkBase('rot',{ersteindruck:'Patient klagt plötzlich über massive Brustschmerzen, ausstrahlend in den linken Arm, Kaltschweiß.',
+    befunde:'Akutes Koronarsyndrom vermutet, deutlich reduzierter Allgemeinzustand, Unruhe.',
+    xabcde:{B:`AF ${jitter(22,0.1)}/min`,C:`Puls ${jitter(110,0.1)}/min, unregelmäßig`,D:'Wach, ängstlich, starke Schmerzen'},
+    sampler:{S:'Massiver Druck auf der Brust, Ausstrahlung linker Arm',P:'Bekannte Herzerkrankung',M:'Blutdrucksenker',E:'Kein Trauma, akutes internistisches Ereignis'},
+    vitals:{puls:jitter(110,0.1)+'/min',blutdruck:jitter(160,0.08)+'/100 mmHg',af:jitter(22,0.1)+'/min',spo2:jitter(93,0.02)+'%'},
+    scores:{news2:'7'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt am Boden, ${side} Unterschenkel in unnatürlicher Stellung, starke Schmerzen.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Offene Unterschenkelfraktur ${side} mit sichtbarem Knochenkontakt, mäßige Blutung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Offene Fraktur mit Knochenkontakt'},
+    xabcde:{X:'Mäßige Blutung, kontrollierbar mit Druckverband',C:`Puls ${jitter(116,0.08)}/min`,D:'Wach, starke Schmerzen'},
+    sampler:{S:'Starke Schmerzen, NRS 9/10',E:'Verkehrsunfall als Fußgänger'},
+    vitals:{puls:jitter(116,0.08)+'/min',blutdruck:jitter(100,0.07)+'/65 mmHg',af:jitter(22,0.08)+'/min',spo2:jitter(95,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'5'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient sitzt zusammengesackt, Atmung deutlich angestrengt, Lippen bläulich verfärbt.',
+    befunde:'Zunehmende Ateminsuffizienz bei Verdacht auf Rippenserienfraktur, instabiler Thoraxabschnitt tastbar.',
+    koerper:{thoraxVorne:'Instabiler Thoraxabschnitt, paradoxe Atembewegung'},
+    xabcde:{B:`AF ${jitter(32,0.1)}/min, paradoxe Atembewegung`,C:`Puls ${jitter(128,0.08)}/min`,D:'Wach, sichtlich erschöpft'},
+    sampler:{S:'Starke Atemnot',E:'Sturz auf den Brustkorb'},
+    vitals:{puls:jitter(128,0.08)+'/min',blutdruck:jitter(98,0.08)+'/64 mmHg',af:jitter(32,0.1)+'/min',spo2:jitter(86,0.03)+'%'},
+    scores:{news2:'8'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt seitlich, hat sich mehrfach übergeben, reagiert nur noch verzögert auf lautes Ansprechen.',
+    befunde:'Verdacht auf schweres Schädel-Hirn-Trauma, wiederholtes Erbrechen, zunehmende Bewusstseinstrübung.',
+    koerper:{kopf:'Prellmarke, keine offene Wunde sichtbar'},
+    xabcde:{A:'Aspirationsgefahr durch Erbrechen, Atemweg wird freigehalten',C:`Puls ${jitter(100,0.08)}/min`,D:'Zunehmend somnolent, GCS 10'},
+    sampler:{S:'Nicht erhebbar, zunehmend eingeschränkte Ansprechbarkeit',E:'Sturz aus größerer Höhe'},
+    vitals:{puls:jitter(100,0.08)+'/min',blutdruck:jitter(140,0.07)+'/90 mmHg',af:jitter(18,0.08)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{gcs:'10',news2:'6'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt am Boden, ${side} Hand fast vollständig abgetrennt, blutet stark.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Subtotale Amputation der ${side} Hand, Blutung mittels Druckverband teilkontrolliert.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Subtotale Amputation, Druckverband angelegt'},
+    xabcde:{X:'Starke Blutung, Druckverband angelegt',C:`Puls ${jitter(126,0.08)}/min, blass`,D:'Wach, starke Schmerzen, ängstlich'},
+    sampler:{S:'Starke Schmerzen',E:'Einklemmung in Maschine'},
+    vitals:{puls:jitter(126,0.08)+'/min',blutdruck:jitter(96,0.08)+'/62 mmHg',af:jitter(24,0.09)+'/min',spo2:jitter(94,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt auf dem Rücken, Bauchdecke sichtbar gespannt, klagt kaum noch, wirkt zunehmend teilnahmslos.',
+    befunde:'Zunehmend stilles Abdomen bei Verdacht auf innere Blutung, Kreislauf dekompensierend.',
+    xabcde:{C:`Puls ${jitter(136,0.08)}/min, kaum tastbar, RR fallend`,D:'Zunehmend teilnahmslos, GCS 13'},
+    sampler:{S:'Nachlassende Schmerzäußerung trotz schwerer Verletzung',E:'Stumpfes Bauchtrauma durch Anprall'},
+    vitals:{puls:jitter(136,0.08)+'/min',blutdruck:jitter(80,0.08)+'/52 mmHg',af:jitter(26,0.09)+'/min',spo2:jitter(92,0.02)+'%',rekap:'4 Sek.'},
+    scores:{gcs:'13',qsofa:'2',news2:'8'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient wirkt zunehmend verwirrt, spricht unzusammenhängend, wiederholt dieselben Fragen.',
+    befunde:'Verdacht auf hypoxische Verwirrtheit bei Rauchgasinhalation, keine sichtbaren äußeren Verletzungen.',
+    xabcde:{A:'Frei, aber heisere Stimme',B:`AF ${jitter(28,0.1)}/min`,C:`Puls ${jitter(112,0.08)}/min`,D:'Verwirrt, desorientiert, GCS 13'},
+    sampler:{S:'Verwirrtheit, Kopfschmerzen',E:'Längere Rauchgasexposition in geschlossenem Raum'},
+    vitals:{puls:jitter(112,0.08)+'/min',blutdruck:jitter(110,0.07)+'/72 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(88,0.03)+'%',co:jitter(22,0.12)+'%'},
+    scores:{gcs:'13',news2:'6'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt verkrampft am Boden, hält sich den Unterleib, kaltschweißig und auffällig blass.',
+    befunde:'Instabile Beckenfraktur mit sichtbarer Beckenasymmetrie, zunehmender Kreislaufschock.',
+    xabcde:{X:'Innere Blutung im Becken möglich',B:`AF ${jitter(26,0.1)}/min`,C:`Puls ${jitter(135,0.08)}/min, kaum tastbar`,D:'Wach, zunehmend unruhig'},
+    sampler:{S:'Starke Beckenschmerzen',E:'Verschüttung, Trümmerlage'},
+    vitals:{puls:jitter(135,0.08)+'/min',blutdruck:jitter(80,0.08)+'/50 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(90,0.03)+'%',rekap:'4 Sek.'},
+    scores:{qsofa:'2',news2:'8'}}),
+  ()=>{ const p=jitter(150,0.08);
+    return mkBase('rot',{ersteindruck:'Patient krampfte sichtbar am Boden, liegt nun schlaff und ist nicht erweckbar, Zungenbiss sichtbar.',
+    befunde:'Generalisierter Krampfanfall, postiktal nicht erweckbar, Kopfverletzung durch Sturz während des Anfalls.',
+    koerper:{kopf:'Kleine Platzwunde durch Sturz'},
+    xabcde:{A:'Frei, aber reduzierte Schutzreflexe',B:`AF ${jitter(24,0.1)}/min`,C:`Puls ${p}/min`,D:'Postiktal, GCS 9, nicht erweckbar'},
+    sampler:{S:'Nicht erhebbar (postiktal)',P:'Anfallsleiden unbekannt',E:'Krampfanfall während der Lage'},
+    vitals:{puls:p+'/min',blutdruck:jitter(110,0.06)+'/70 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(90,0.02)+'%'},
+    scores:{gcs:'9',news2:'6'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt am Boden, ${side} Unterschenkel in unnatürlicher Stellung, Schmerzensäußerung lässt spürbar nach.`,
+    befunde:`Offene Unterschenkelfraktur ${side} mit sichtbarem Knochendurchtritt, zunehmend blasser Patient.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Offene Fraktur mit Knochendurchtritt'},
+    xabcde:{X:'Mäßige, aber anhaltende Blutung',C:`Puls ${jitter(120,0.08)}/min, blass`,D:'Wach, Schmerzen lassen nach, wirkt zunehmend apathisch'},
+    sampler:{S:'Starke Schmerzen, nun nachlassend',E:'Sturz von Trümmerteilen'},
+    vitals:{puls:jitter(120,0.08)+'/min',blutdruck:jitter(92,0.07)+'/58 mmHg',af:jitter(24,0.08)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'7'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient sitzt zusammengesunken, hält sich die Brust, Lippen bläulich verfärbt, Atmung deutlich angestrengt.',
+    befunde:'Verdacht auf akutes Koronarsyndrom, ausstrahlender Brustschmerz, zunehmende Luftnot.',
+    xabcde:{B:`AF ${jitter(26,0.1)}/min, angestrengt`,C:`Puls ${jitter(110,0.1)}/min, unregelmäßig`,D:'Wach, sehr ängstlich'},
+    sampler:{S:'Starker Brustschmerz, ausstrahlend in linken Arm',P:'Bekannte Herzerkrankung',E:'Internistisches Ereignis unter Stress der Lage, kein Trauma'},
+    vitals:{puls:jitter(110,0.1)+'/min',blutdruck:jitter(95,0.08)+'/60 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(89,0.03)+'%'},
+    scores:{news2:'8',qsofa:'1'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient ringt nach Luft, pfeifendes Atemgeräusch hörbar, Lippen zunehmend bläulich.',
+    befunde:'Schwerer Asthmaanfall (Status asthmaticus), deutlich verlängertes Exspirium, Erschöpfung der Atemmuskulatur.',
+    xabcde:{B:`AF ${jitter(34,0.1)}/min, exspiratorisches Giemen`,C:`Puls ${jitter(128,0.08)}/min`,D:'Wach, sehr erschöpft'},
+    sampler:{S:'Zunehmende Atemnot',P:'Bekanntes Asthma bronchiale',E:'Verschlechterung durch Rauch-/Staubexposition'},
+    vitals:{puls:jitter(128,0.08)+'/min',blutdruck:jitter(118,0.06)+'/76 mmHg',af:jitter(34,0.1)+'/min',spo2:jitter(84,0.03)+'%'},
+    scores:{news2:'8'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Patient liegt am Boden, ${side} Arm auf Höhe des Ellenbogens fast vollständig abgetrennt.`,
+    befunde:`Subtotale Amputation des ${side} Unterarms, kontrollierbare, aber erhebliche Blutung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Subtotale Amputation, Blutung notdürftig gestillt'},
+    xabcde:{X:'Erhebliche Blutung, notdürftig komprimiert',C:`Puls ${jitter(122,0.08)}/min, blass`,D:'Wach, starke Schmerzen'},
+    sampler:{S:'Extreme Schmerzen, NRS 10/10',E:'Einklemmung durch Maschinenteil/Trümmer'},
+    vitals:{puls:jitter(122,0.08)+'/min',blutdruck:jitter(98,0.07)+'/62 mmHg',af:jitter(24,0.08)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt reglos im Uferbereich, wurde soeben von Ersthelfern geborgen, atmet stoßweise.',
+    befunde:'Zustand nach Beinahe-Ertrinken, Wasser in den Atemwegen, unregelmäßige, angestrengte Atmung.',
+    xabcde:{A:'Teilweise verlegt, gurgelnde Atemgeräusche',B:`AF ${jitter(30,0.1)}/min, unregelmäßig`,C:`Puls ${jitter(112,0.08)}/min`,D:'Somnolent, GCS 11'},
+    sampler:{S:'Nicht erhebbar (somnolent)',E:'Beinahe-Ertrinken'},
+    vitals:{puls:jitter(112,0.08)+'/min',blutdruck:jitter(105,0.06)+'/68 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(80,0.04)+'%'},
+    scores:{gcs:'11',news2:'8'}}),
+  ()=>{ const side=pick(['linke','rechte']);
+    return mkBase('rot',{ersteindruck:`Patient liegt seitlich, ${side} Thoraxhälfte bewegt sich paradox bei der Atmung.`,
+    befunde:`Instabiler Thorax (Rippenserienfraktur) ${side}, paradoxe Atembewegung, zunehmende Atemnot.`,
+    koerper:{thoraxVorne:'Instabile Thoraxwand, paradoxe Atmung'},
+    xabcde:{B:`AF ${jitter(30,0.1)}/min, paradoxe Bewegung`,C:`Puls ${jitter(124,0.08)}/min`,D:'Wach, starke Schmerzen bei Atmung'},
+    sampler:{S:'Starke atemabhängige Schmerzen',E:'Sturz/Anprall gegen Trümmerteile'},
+    vitals:{puls:jitter(124,0.08)+'/min',blutdruck:jitter(100,0.07)+'/64 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(88,0.03)+'%',rekap:'3 Sek.'},
+    scores:{news2:'7'}});},
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt reglos, Gesicht und Hals deutlich geschwollen, Atmung zunehmend erschwert nach Insektenstich.',
+    befunde:'Verdacht auf schwere allergische Reaktion (Anaphylaxie), Schwellung im Gesicht-/Halsbereich, zunehmende Atemnot.',
+    koerper:{kopf:'Deutliche Schwellung im Gesicht'},
+    xabcde:{A:'Zunehmend verlegt durch Schwellung',B:`AF ${jitter(28,0.1)}/min, stridorös`,C:`Puls ${jitter(130,0.08)}/min`,D:'Wach, sehr unruhig'},
+    sampler:{A:'Bekannte Insektengiftallergie',S:'Zunehmende Atemnot, Hautausschlag',E:'Insektenstich während der Lage'},
+    vitals:{puls:jitter(130,0.08)+'/min',blutdruck:jitter(85,0.08)+'/55 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(87,0.03)+'%'},
+    scores:{news2:'8'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt auf dem Rücken, keine Bewegung der Beine erkennbar, klagt über Gefühllosigkeit.',
+    befunde:'Verdacht auf Wirbelsäulentrauma mit Querschnittsymptomatik, keine Motorik/Sensibilität unterhalb der Verletzung.',
+    xabcde:{C:`Puls ${jitter(70,0.1)}/min, auffällig niedrig (neurogener Schock möglich)`,D:'Wach, Gefühllosigkeit beider Beine'},
+    sampler:{S:'Kein Gefühl in den Beinen',E:'Sturz aus großer Höhe auf den Rücken'},
+    vitals:{puls:jitter(70,0.1)+'/min',blutdruck:jitter(85,0.08)+'/55 mmHg',af:jitter(20,0.08)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{news2:'5'}}),
+  ()=>mkBase('rot',{ersteindruck:'Patient liegt am Boden, starker Chemikaliengeruch, Haut im Kontaktbereich gerötet und blasenbildend.',
+    befunde:'Großflächige chemische Verätzung am Rumpf, beginnende Kreislaufreaktion durch Schmerz.',
+    koerper:{thoraxVorne:'Chemische Verätzung, Blasenbildung'},
+    xabcde:{B:`AF ${jitter(24,0.08)}/min`,C:`Puls ${jitter(116,0.08)}/min`,D:'Wach, starke Schmerzen'},
+    sampler:{S:'Brennende Schmerzen am Rumpf',E:'Kontakt mit ausgelaufener Chemikalie'},
+    vitals:{puls:jitter(116,0.08)+'/min',blutdruck:jitter(105,0.07)+'/68 mmHg',af:jitter(24,0.08)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{news2:'6'}})
+];
+
+// ---- Erwachsene: BLAU (sehr schwer, kaum überlebensfähig unter Übungsbedingungen) ----
+const TPL_ERW_BLAU = [
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, tiefe Bewusstlosigkeit, keine erkennbare Reaktion auf Schmerzreize.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Schweres Schädel-Hirn-Trauma mit Einklemmungszeichen (weite, lichtstarre Pupille).',
+    koerper:{kopf:'Schweres SHT, sichtbare Kopfverletzung'},
+    xabcde:{A:'Frei, aber keine Schutzreflexe',B:`AF ${jitter(8,0.15)}/min, unregelmäßig`,C:`Puls ${jitter(50,0.15)}/min, kaum tastbar`,D:'GCS 3, weite lichtstarre Pupille'},
+    sampler:{S:'Keine Anamnese möglich (bewusstlos)',E:'Sturz aus großer Höhe'},
+    vitals:{puls:jitter(50,0.15)+'/min',blutdruck:jitter(70,0.1)+'/40 mmHg',af:jitter(8,0.15)+'/min',spo2:jitter(78,0.05)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'3',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, großflächige Verbrennungen über weite Teile des Körpers sichtbar.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Verbrennungen 3. Grades, geschätzt über 60% der Körperoberfläche, Atemwege mitbetroffen.',
+    koerper:{thoraxVorne:'Verbrennung 3. Grades',armLinks:'Verbrennung 3. Grades',armRechts:'Verbrennung 3. Grades',beinLinks:'Verbrennung 3. Grades'},
+    xabcde:{A:'Verlegt durch Schwellung/Ruß',B:`AF ${jitter(10,0.15)}/min, flach`,C:`Puls ${jitter(140,0.1)}/min, kaum tastbar`,D:'Nicht ansprechbar'},
+    sampler:{S:'Keine Anamnese möglich',E:'Explosion mit Stichflamme'},
+    vitals:{puls:jitter(140,0.1)+'/min',blutdruck:jitter(65,0.1)+'/40 mmHg',af:jitter(10,0.15)+'/min',spo2:jitter(70,0.06)+'%',co:jitter(35,0.1)+'%'},
+    scores:{gcs:'4',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos unter Trümmerteilen hervorgeborgen, massive äußere Blutung nicht mehr kontrollierbar.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Nicht beherrschbare Blutung bei Vorliegen mehrerer schwerer Traumata, Kreislauf dekompensiert.',
+    koerper:{beinLinks:'Schwere Quetschverletzung, massive Blutung'},
+    xabcde:{X:'Massive, nicht kontrollierbare Blutung',C:`Puls ${jitter(150,0.1)}/min, kaum tastbar`,D:'GCS 4'},
+    sampler:{S:'Keine Anamnese möglich',E:'Verschüttung, Trümmerlage'},
+    vitals:{puls:jitter(150,0.1)+'/min',blutdruck:jitter(60,0.12)+'/35 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(75,0.06)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'4',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, ausgedehnte innere Verletzungen nach längerer Verschüttung vermutet, kaum Reaktion auf Schmerzreize.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Verdacht auf ausgedehnte innere Verletzungen nach längerer Verschüttung, Kreislauf stark dekompensiert.',
+    koerper:{thoraxVorne:'Quetschverletzung nach Verschüttung'},
+    xabcde:{X:'Innere Blutung wahrscheinlich',B:`AF ${jitter(9,0.15)}/min, unregelmäßig`,C:`Puls ${jitter(145,0.1)}/min, kaum tastbar`,D:'GCS 4, kaum Reaktion auf Schmerzreiz'},
+    sampler:{S:'Keine Anamnese möglich',E:'Längere Verschüttung unter Trümmern'},
+    vitals:{puls:jitter(145,0.1)+'/min',blutdruck:jitter(65,0.1)+'/40 mmHg',af:jitter(9,0.15)+'/min',spo2:jitter(74,0.05)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'4',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, massive Kopfverletzung, nur noch vereinzelte Schnappatmung erkennbar.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Schweres Schädel-Hirn-Trauma mit Schnappatmung, keine gezielte Reaktion auf Ansprache oder Schmerzreiz.',
+    koerper:{kopf:'Schwere Kopfverletzung'},
+    xabcde:{A:'Frei, aber keine Schutzreflexe',B:`AF ${jitter(6,0.2)}/min, Schnappatmung`,C:`Puls ${jitter(45,0.15)}/min, sehr schwach`,D:'GCS 3'},
+    sampler:{S:'Keine Anamnese möglich',E:'Sturz aus großer Höhe'},
+    vitals:{puls:jitter(45,0.15)+'/min',blutdruck:jitter(65,0.1)+'/35 mmHg',af:jitter(6,0.2)+'/min',spo2:jitter(72,0.06)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'3',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, starke innere und äußere Blutung durch multiple Splitterverletzungen.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Multiple Splitterverletzungen mit schwer kontrollierbarer Blutung, Kreislauf massiv dekompensiert.',
+    koerper:{thoraxVorne:'Multiple Splitterverletzungen',beinRechts:'Multiple Splitterverletzungen'},
+    xabcde:{X:'Multiple, schwer kontrollierbare Blutungsquellen',C:`Puls ${jitter(148,0.1)}/min, kaum tastbar`,D:'GCS 4'},
+    sampler:{S:'Keine Anamnese möglich',E:'Explosion, Splitterwirkung'},
+    vitals:{puls:jitter(148,0.1)+'/min',blutdruck:jitter(60,0.1)+'/35 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(76,0.05)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'4',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos unter eingestürztem Bauteil, Brustkorb sichtbar deformiert, kaum Eigenatmung.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Massive Thoraxquetschung mit kaum vorhandener Eigenatmung, Kreislauf hochgradig instabil.',
+    koerper:{thoraxVorne:'Massive Quetschung, sichtbare Deformierung'},
+    xabcde:{B:`AF ${jitter(7,0.2)}/min, sehr flach`,C:`Puls ${jitter(140,0.1)}/min, kaum tastbar`,D:'GCS 3'},
+    sampler:{S:'Keine Anamnese möglich',E:'Einsturz, Verschüttung unter Bauteil'},
+    vitals:{puls:jitter(140,0.1)+'/min',blutdruck:jitter(60,0.12)+'/35 mmHg',af:jitter(7,0.2)+'/min',spo2:jitter(70,0.06)+'%',rekap:'>4 Sek.'},
+    scores:{gcs:'3',news2:'9'}}),
+  ()=>mkBase('blau',{ersteindruck:'Patient liegt reglos, schwere Rauchgasvergiftung mit tiefer Bewusstlosigkeit, kaum Eigenatmung.',
+    gehfaehigkeit:'nicht gehfähig, bewusstlos',
+    befunde:'Schwere Rauchgas-/CO-Vergiftung mit tiefer Bewusstlosigkeit und respiratorischer Erschöpfung.',
+    koerper:{kopf:'Rußspuren um Mund und Nase'},
+    xabcde:{A:'Verlegt durch Ruß/Schwellung',B:`AF ${jitter(8,0.2)}/min, sehr flach`,C:`Puls ${jitter(135,0.1)}/min`,D:'GCS 3'},
+    sampler:{S:'Keine Anamnese möglich',E:'Längere Rauchgasexposition in geschlossenem Raum'},
+    vitals:{puls:jitter(135,0.1)+'/min',blutdruck:jitter(70,0.1)+'/40 mmHg',af:jitter(8,0.2)+'/min',spo2:jitter(65,0.06)+'%',co:jitter(45,0.1)+'%'},
+    scores:{gcs:'3',news2:'9'}})
+];
+
+// ---- Erwachsene: SCHWARZ (verstorben) ----
+const TPL_ERW_SCHWARZ = [
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt regungslos, keine sichtbare Atemtätigkeit, keine Reaktion auf Ansprache oder Schmerzreiz.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Kein Puls tastbar, keine Atmung feststellbar, Kreislaufstillstand ohne Wiederkehr des Kreislaufs.',
+    xabcde:{A:'Atemweg frei, aber keine Eigenatmung',B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion, GCS 3'},
+    sampler:{S:'Nicht erhebbar',E:'Unbekannt / im Rahmen der Großschadenslage'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar',rekap:'nicht beurteilbar'},
+    scores:{gcs:'3',news2:'nicht ermittelbar'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos, mit den vorliegenden Verletzungen offensichtlich nicht mit dem Leben vereinbar.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Verletzungsmuster eindeutig nicht überlebensfähig, keine Vitalzeichen feststellbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion'},
+    sampler:{S:'Nicht erhebbar',E:'Schwere Krafteinwirkung im Rahmen der Lage'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar'},
+    scores:{gcs:'3'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos unter eingestürzten Bauteilen, bei Bergung keine Vitalzeichen feststellbar.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Keine Atmung, kein Puls, Verletzungsmuster mit dem Leben nicht vereinbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion, GCS 3'},
+    sampler:{S:'Nicht erhebbar',E:'Verschüttung unter eingestürzten Bauteilen'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar',rekap:'nicht beurteilbar'},
+    scores:{gcs:'3',news2:'nicht ermittelbar'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos, ausgedehnte Verbrennungen am gesamten Körper, keine Lebenszeichen bei Auffinden.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Schwerste Verbrennungen, keine Atmung, kein Puls feststellbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion'},
+    sampler:{S:'Nicht erhebbar',E:'Explosion mit Brandfolge'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar'},
+    scores:{gcs:'3'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos neben verunfalltem Fahrzeug, keine Reaktion auf Ansprache oder Schmerzreiz feststellbar.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Multiple schwerste Verletzungen, keine Atmung, kein Puls tastbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion, GCS 3'},
+    sampler:{S:'Nicht erhebbar',E:'Verkehrsunfall im Rahmen der Lage'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar'},
+    scores:{gcs:'3'}}),
+  ()=>mkBase('schwarz',{ersteindruck:'Patient liegt reglos unter schwerem Trümmerteil, bei Bergung bereits keine Kreislaufzeichen.',
+    gehfaehigkeit:'nicht gehfähig, keine Vitalfunktionen',
+    befunde:'Massive Quetschverletzung des Rumpfes, keine Atmung, kein Puls feststellbar.',
+    xabcde:{B:'Keine Atmung feststellbar',C:'Kein Puls tastbar',D:'Keine Reaktion, GCS 3'},
+    sampler:{S:'Nicht erhebbar',E:'Verschüttung unter schwerem Trümmerteil'},
+    vitals:{puls:'nicht tastbar',blutdruck:'nicht messbar',af:'0/min',spo2:'nicht ermittelbar'},
+    scores:{gcs:'3'}})
+];
+
+// ---- Erwachsene: GELB ----
+const TPL_ERW_GELB = [
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient sitzt am Boden, hält sich den ${side} Unterschenkel, deutliche Schwellung sichtbar.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Geschlossene Unterschenkelfraktur ${side}, Schwellung, keine kritische Blutung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Geschlossene Fraktur, Schwellung'},
+    sampler:{S:'Schmerzen Unterschenkel, NRS 6/10',E:'Sturz/Stolpern'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient sitzt gebeugt, atmet flach, hält sich den Brustkorb, sichtlich schmerzgeplagt.',
+    befunde:'Prellmarke am Rippenbogen, schmerzbedingt flache Atmung, stabile Vitalwerte.',
+    koerper:{thoraxVorne:'Prellmarke, Druckschmerz'},
+    sampler:{S:'Schmerzen beim Einatmen',E:'Anprall gegen Gegenstand'},
+    vitals:{puls:jitter(96,0.06)+'/min',blutdruck:jitter(130,0.05)+'/84 mmHg',af:jitter(20,0.08)+'/min',spo2:jitter(96,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient sitzt benommen, hält sich eine blutende Wunde am Kopf, war laut Umstehenden kurz bewusstlos.',
+    befunde:'Platzwunde am Kopf, kurze Bewusstlosigkeit (Amnesie), aktuell wach und orientiert.',
+    koerper:{kopf:'Platzwunde, versorgt'},
+    xabcde:{D:'Wach, orientiert, Z.n. kurzer Bewusstlosigkeit'},
+    sampler:{S:'Kopfschmerzen, Erinnerungslücke',E:'Sturz mit Kopfanprall'},
+    vitals:{puls:jitter(88,0.06)+'/min',blutdruck:jitter(125,0.05)+'/80 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(97,0.01)+'%'},
+    scores:{gcs:'15',news2:'2'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält das ${side} Handgelenk fest, deutliche Schwellung und Fehlstellung.`,
+    befunde:`Verdacht auf Handgelenksfraktur ${side}, Schwellung, Bewegungseinschränkung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Fraktur Handgelenk, Schwellung'},
+    sampler:{S:'Schmerzen Handgelenk',E:'Sturz auf ausgestreckte Hand'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient zeigt eine gerötete, blasige Hautveränderung am ${side} Unterarm.`,
+    befunde:`Verbrennung 2. Grades am ${side} Unterarm, ca. handtellergroß.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Verbrennung 2. Grades, ca. handtellergroß'},
+    sampler:{S:'Brennende Schmerzen Unterarm',E:'Kontakt mit heißer Oberfläche'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(124,0.05)+'/78 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient sitzt am Boden, deutlich sichtbare Prellungen an Armen und Beinen nach Sturz.',
+    befunde:'Multiple Prellungen, keine relevanten Frakturen tastbar, Kreislauf stabil.',
+    koerper:{beinLinks:'Prellmarke'},
+    sampler:{S:'Schmerzen an mehreren Körperstellen',E:'Sturz über Hindernis'},
+    vitals:{puls:jitter(94,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(98,0.01)+'%'}}),
+  ()=>{ const side=pick(['linkes','rechtes']);
+    return mkBase('gelb',{ersteindruck:`Patient sitzt am Boden, hält sich das ${side} Sprunggelenk, deutliche Schwellung.`,
+    befunde:`Distorsion ${side} Sprunggelenk mit Schwellung, keine offene Verletzung.`,
+    gehfaehigkeit:'nicht gehfähig',
+    koerper:{[side==='linkes'?'beinLinks':'beinRechts']:'Schwellung Sprunggelenk'},
+    sampler:{S:'Schmerzen Sprunggelenk',E:'Umknicken beim Laufen'},
+    vitals:{puls:jitter(88,0.06)+'/min',blutdruck:jitter(122,0.05)+'/78 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient hält die Schulter in Schonhaltung, deutliche sichtbare Fehlstellung.',
+    befunde:'Verdacht auf Schulterluxation, schmerzbedingte Schonhaltung, periphere Durchblutung intakt.',
+    koerper:{armRechts:'Fehlstellung Schulter'},
+    sampler:{S:'Starke Schmerzen Schulter',E:'Sturz auf ausgestreckten Arm'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(18,0.07)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient wirkt aufgeregt, hyperventiliert, klagt über Kribbeln in Händen und um den Mund.',
+    befunde:'Hyperventilation mit Parästhesien, keine körperliche Verletzung erkennbar.',
+    sampler:{S:'Kribbeln, Schwindel, Atemnotgefühl',E:'Akute Belastungsreaktion'},
+    vitals:{puls:jitter(104,0.06)+'/min',blutdruck:jitter(134,0.05)+'/86 mmHg',af:jitter(28,0.08)+'/min',spo2:jitter(98,0.01)+'%'},
+    scores:{news2:'3'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient wirkt blass und schwach, klagt über Schwindel beim Aufstehen.',
+    befunde:'Kreislaufschwäche, vermutlich Flüssigkeitsmangel, keine äußeren Verletzungen.',
+    sampler:{S:'Schwindel, Schwäche',E:'Längere Wartezeit ohne Flüssigkeitszufuhr'},
+    vitals:{puls:jitter(98,0.06)+'/min',blutdruck:jitter(102,0.06)+'/68 mmHg',af:jitter(18,0.07)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält den ${side} Fuß fest, deutliche Schwellung, kann nicht auftreten.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Verdacht auf Mittelfußfraktur ${side}, starke Schwellung, kann nicht belasten.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Verdacht auf Fraktur, Schwellung'},
+    sampler:{S:'Starke Schmerzen beim Belasten',E:'Herabfallender Gegenstand auf den Fuß'},
+    vitals:{puls:jitter(94,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient hustet anhaltend, Augen gerötet und tränend, war kurzzeitig in dichtem Rauch.',
+    befunde:'Mittelgradige Rauchgasexposition, Reizung der Atemwege, Sättigung leicht erniedrigt.',
+    xabcde:{B:`AF ${jitter(24,0.08)}/min`},
+    sampler:{S:'Hustenreiz, tränende Augen',E:'Rauchexposition'},
+    vitals:{puls:jitter(98,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(24,0.08)+'/min',spo2:jitter(94,0.02)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält die ${side} Rippenregion, atmet spürbar flacher als üblich.`,
+    befunde:`Verdacht auf einzelne Rippenfraktur ${side}, atemabhängiger Druckschmerz, keine Atemnot in Ruhe.`,
+    koerper:{thoraxVorne:'Druckschmerz, Verdacht auf Rippenfraktur'},
+    sampler:{S:'Atemabhängiger Schmerz',E:'Sturz gegen Kante'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(20,0.07)+'/min',spo2:jitter(96,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient hält sich den Nacken, berichtet über Schmerzen nach ruckartiger Bewegung.',
+    befunde:'Verdacht auf Halswirbelsäulen-Distorsion (Schleudertrauma), keine neurologischen Ausfälle.',
+    koerper:{},
+    sampler:{S:'Nackenschmerzen, Bewegungseinschränkung',E:'Ruckartige Bewegung beim Ausweichen'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(98,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält sich das ${side} Auge, tränt stark, kann es kaum öffnen.`,
+    befunde:`Fremdkörper/Reizung am ${side} Auge, deutlicher Tränenfluss, Sehschärfe subjektiv vermindert.`,
+    sampler:{S:'Starkes Brennen im Auge',E:'Staub-/Splitterexposition'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(124,0.05)+'/80 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient sitzt zusammengesunken, klagt über zunehmende Übelkeit und Kopfschmerzen ohne erkennbares Trauma.',
+    befunde:'Verdacht auf Kreislaufdysregulation, keine äußeren Verletzungen, leicht reduzierter Allgemeinzustand.',
+    sampler:{S:'Übelkeit, Kopfschmerzen',E:'Kein Trauma, internistisches Beschwerdebild'},
+    vitals:{puls:jitter(102,0.06)+'/min',blutdruck:jitter(100,0.06)+'/65 mmHg',af:jitter(19,0.07)+'/min',spo2:jitter(96,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält den ${side} Ellenbogen in Schonhaltung, deutliche Schwellung sichtbar.`,
+    befunde:`Verdacht auf Ellenbogenfraktur ${side}, Schwellung, schmerzbedingte Schonhaltung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Schwellung, Verdacht auf Fraktur'},
+    sampler:{S:'Schmerzen Ellenbogen',E:'Sturz auf den Arm'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält das ${side} Schlüsselbein, deutliche Fehlstellung sichtbar, stützt den Arm ab.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Verdacht auf Klavikulafraktur ${side}, tastbare Stufenbildung, periphere Durchblutung intakt.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Verdacht auf Klavikulafraktur'},
+    sampler:{S:'Schmerzen beim Bewegen des Arms',E:'Sturz auf die Schulter'},
+    vitals:{puls:jitter(90,0.06)+'/min',blutdruck:jitter(126,0.05)+'/80 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient sitzt am Boden, ${side} Knie stark geschwollen, kann es nicht durchstrecken.`,
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:`Verdacht auf Knieverletzung (Band-/Fraktur) ${side}, deutliche Schwellung, Bewegungseinschränkung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Schwellung, Bewegungseinschränkung'},
+    sampler:{S:'Starke Knieschmerzen',E:'Verdrehung des Knies beim Ausweichen'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(124,0.05)+'/78 mmHg',af:jitter(17,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient hält sich benommen den Kopf, keine Bewusstlosigkeit, klagt über Schwindel und Übelkeit.',
+    befunde:'Verdacht auf leichte Gehirnerschütterung ohne Bewusstseinsverlust, Übelkeit, Kopfschmerzen.',
+    xabcde:{D:'Wach, orientiert, aber Kopfschmerzen und Schwindel'},
+    sampler:{S:'Kopfschmerzen, Schwindel, Übelkeit',E:'Anprall des Kopfes gegen Gegenstand'},
+    vitals:{puls:jitter(88,0.06)+'/min',blutdruck:jitter(124,0.05)+'/80 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(98,0.01)+'%'},
+    scores:{gcs:'15',news2:'1'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient zeigt eine tiefe, klaffende Schnittwunde am ${side} Unterschenkel, mäßige Blutung.`,
+    befunde:`Tiefe Schnittwunde ${side} Unterschenkel, Blutung durch Druckverband kontrolliert, keine Fraktur tastbar.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Tiefe Schnittwunde, Blutung kontrolliert'},
+    sampler:{S:'Brennender Schmerz an der Wunde',E:'Schnittverletzung durch scharfkantiges Trümmerteil'},
+    vitals:{puls:jitter(96,0.06)+'/min',blutdruck:jitter(122,0.05)+'/78 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient zittert stark, Haut kühl, berichtet über längeren Aufenthalt im Freien bei kaltem Wetter.',
+    befunde:'Beginnende Unterkühlung (Hypothermie Grad I-II), Patient zittert, Bewusstsein klar.',
+    xabcde:{D:'Wach, orientiert, deutliches Kältezittern'},
+    sampler:{S:'Kälteempfinden, Zittern',E:'Längere Kälteexposition ohne Schutzkleidung'},
+    vitals:{puls:jitter(84,0.06)+'/min',blutdruck:jitter(118,0.05)+'/76 mmHg',af:jitter(16,0.06)+'/min',spo2:jitter(96,0.01)+'%',temp:'34,8°C'},
+    scores:{news2:'3'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Patient hält die ${side} Hand fest umwickelt, ein Finger fehlt sichtbar.`,
+    befunde:`Amputation eines Fingers der ${side} Hand, Blutung durch Verband kontrolliert.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Fingeramputation, Blutung kontrolliert'},
+    sampler:{S:'Starke Schmerzen an der Hand',E:'Einklemmung in Trümmerteilen'},
+    vitals:{puls:jitter(98,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Patient spuckt Blut, hält sich den Mund, zwei Zähne sichtbar ausgeschlagen.',
+    befunde:'Zahnverlust und Weichteilverletzung im Mundbereich, Atemweg frei, Blutung mäßig.',
+    koerper:{kopf:'Weichteilverletzung Mundbereich, Zahnverlust'},
+    sampler:{S:'Schmerzen im Mundbereich',E:'Anprall des Gesichts gegen Gegenstand'},
+    vitals:{puls:jitter(96,0.06)+'/min',blutdruck:jitter(124,0.05)+'/80 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient hält sich den Rücken, kann sich nur unter Schmerzen aufrichten, keine Lähmungserscheinungen.',
+    gehfaehigkeit:'nicht gehfähig',
+    befunde:'Verdacht auf Wirbelkörperprellung/-fraktur ohne neurologische Ausfälle, deutlicher Bewegungsschmerz.',
+    sampler:{S:'Rückenschmerzen bei Bewegung',E:'Sturz auf den Rücken'},
+    vitals:{puls:jitter(94,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Patient klagt über starke Bauchschmerzen im rechten Unterbauch, kein Trauma erkennbar.',
+    befunde:'Verdacht auf akutes internistisches Abdomen (z.B. Appendizitis), kein Zusammenhang mit der Schadenslage, stabiler Kreislauf.',
+    sampler:{S:'Zunehmende Bauchschmerzen rechts unten',E:'Kein Trauma, bereits vor der Lage bestehende Beschwerden'},
+    vitals:{puls:jitter(100,0.06)+'/min',blutdruck:jitter(118,0.05)+'/76 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(97,0.01)+'%',temp:'37,8°C'},
+    scores:{news2:'2'}})
+];
+
+// ---- Erwachsene: GRÜN ----
+const TPL_ERW_GRUEN = [
+  ()=>mkBase('gruen',{ersteindruck:'Patient läuft selbstständig umher, zeigt oberflächliche Schürfwunden an beiden Händen.',
+    befunde:'Oberflächliche Schürfwunden, keine relevante Blutung, keine weiteren Auffälligkeiten.',
+    koerper:{armLinks:'Oberflächliche Schürfwunde'},
+    sampler:{E:'Sturz auf ebenem Untergrund'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linke','rechte']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft leicht hinkend, zeigt eine Prellung am ${side} Knie.`,
+    befunde:`Prellung ${side} Knie, keine Bewegungseinschränkung, keine offene Verletzung.`,
+    koerper:{[side==='linke'?'beinLinks':'beinRechts']:'Prellmarke'},
+    sampler:{E:'Anstoßen beim Ausweichen'},
+    vitals:{puls:jitter(82,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, hat eine bereits versorgte kleine Platzwunde an der Stirn.',
+    befunde:'Kleine, oberflächliche Platzwunde, bereits mit Pflaster versorgt, keine weiteren Beschwerden.',
+    sampler:{E:'Leichter Anprall'},
+    vitals:{puls:jitter(78,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient wirkt aufgewühlt und ängstlich, läuft ruhelos umher, keine sichtbaren Verletzungen.',
+    befunde:'Psychischer Ausnahmezustand nach Erlebtem, körperlich unverletzt.',
+    sampler:{S:'Unruhe, Anspannung',E:'Miterleben der Schadenslage'},
+    vitals:{puls:jitter(92,0.06)+'/min',blutdruck:jitter(128,0.05)+'/82 mmHg',af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient hustet leicht, steht selbstständig, war kurzzeitig in verrauchter Umgebung.',
+    befunde:'Leichte Rauchreizung der Atemwege, unauffällige Sauerstoffsättigung.',
+    sampler:{S:'Leichter Hustenreiz',E:'Kurzzeitige Rauchexposition'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient läuft normal, zeigt eine leichte Zerrung im Bereich der Wade.',
+    befunde:'Muskuläre Zerrung, keine Schwellung, keine Bewegungseinschränkung.',
+    sampler:{E:'Ungeschickte Bewegung beim Ausweichen'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient hält sich ein Taschentuch an die Nase, leichtes Nasenbluten bereits im Abklingen.',
+    befunde:'Spontan sistierendes Nasenbluten, keine weiteren Verletzungen.',
+    sampler:{E:'Leichter Stoß gegen die Nase'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient wirkt blass, klagt über leichte Kopfschmerzen nach dem Schreckmoment.',
+    befunde:'Leichte Kopfschmerzen, keine äußeren Verletzungen, keine neurologischen Auffälligkeiten.',
+    sampler:{S:'Leichte Kopfschmerzen',E:'Schreckreaktion ohne direkten Anprall'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient zeigt eine kleine, oberflächliche Splitterverletzung am Unterarm.',
+    befunde:'Oberflächliche Splitterverletzung, keine relevante Blutung.',
+    koerper:{armRechts:'Oberflächliche Splitterverletzung'},
+    sampler:{E:'Umherfliegende Trümmerteile'},
+    vitals:{puls:jitter(82,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, zeigt eine Prellmarke am Rumpf ohne wesentliche Beschwerden.',
+    befunde:'Prellmarke am Rumpf, keine Atemnot, keine relevanten Beschwerden.',
+    koerper:{thoraxVorne:'Prellmarke'},
+    sampler:{E:'Leichter Anprall'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, klagt über leichte Schmerzen am ${side} Ellenbogen nach Streifschuss durch Trümmerteile.`,
+    befunde:`Oberflächliche Schürfwunde am ${side} Ellenbogen, keine Bewegungseinschränkung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Oberflächliche Schürfwunde'},
+    sampler:{E:'Streifende Trümmerteile'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht abseits, wirkt gefasst, berichtet über leichtes Ohrensausen nach der Explosion.',
+    befunde:'Leichtes Ohrensausen (Tinnitus) nach Explosionsknall, kein Blut im Gehörgang, sonst unauffällig.',
+    sampler:{S:'Leichtes Ohrensausen',E:'Explosionsknall in der Nähe'},
+    vitals:{puls:jitter(86,0.05)+'/min',blutdruck:jitter(124,0.04)+'/80 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient läuft selbstständig, zeigt eine kleine Rißwunde in der Kleidung ohne Hautverletzung darunter.',
+    befunde:'Keine Verletzung feststellbar, lediglich beschädigte Kleidung, Patient körperlich unauffällig.',
+    sampler:{E:'Vorbeifliegende Trümmerteile'},
+    vitals:{puls:jitter(78,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt eine kleine Beule am ${side} Schienbein.`,
+    befunde:`Kleines Hämatom am ${side} Schienbein, keine Schwellung, volle Beweglichkeit.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Kleines Hämatom'},
+    sampler:{E:'Anstoßen an Trümmerteil'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient sitzt ruhig, klagt über leichten Durst und Erschöpfung nach längerem Warten in der Sonne.',
+    befunde:'Leichte Erschöpfung, keine Verletzung, ausreichend ansprechbar und orientiert.',
+    sampler:{S:'Erschöpfung, Durst',E:'Längerer Aufenthalt ohne Schatten'},
+    vitals:{puls:jitter(90,0.05)+'/min',blutdruck:jitter(116,0.04)+'/74 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(98,0.01)+'%',temp:'37,6°C'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, zittert leicht vor Aufregung, körperlich unverletzt.',
+    befunde:'Leichtes Zittern durch Aufregung, keine körperliche Verletzung feststellbar.',
+    sampler:{S:'Nervosität, Zittern',E:'Miterleben des Ereignisses aus der Nähe'},
+    vitals:{puls:jitter(96,0.05)+'/min',blutdruck:jitter(130,0.04)+'/84 mmHg',af:jitter(18,0.06)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt einen kleinen Kratzer am ${side} Handrücken.`,
+    befunde:`Oberflächlicher Kratzer am ${side} Handrücken, keine Blutung mehr.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Oberflächlicher Kratzer'},
+    sampler:{E:'Abstützen beim Sturz'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, hält sich leicht hustend den Hals, war kurz Reizgas ausgesetzt.',
+    befunde:'Leichte Reizung der oberen Atemwege durch Rauch/Staub, keine Atemnot, Sättigung normwertig.',
+    sampler:{S:'Leichter Hustenreiz',E:'Kurzzeitige Rauch-/Staubexposition'},
+    vitals:{puls:jitter(88,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient steht, hält sich das ${side} Ohr, kleine oberflächliche Verletzung sichtbar.`,
+    befunde:`Kleine oberflächliche Verletzung am ${side} Ohr, keine relevante Blutung.`,
+    sampler:{E:'Streifende Splitterwirkung'},
+    vitals:{puls:jitter(82,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient sitzt am Boden, wirkt aufgeregt, aber körperlich unverletzt, möchte sofort helfen.',
+    befunde:'Keine körperliche Verletzung feststellbar, psychisch aufgewühlt durch das Ereignis.',
+    sampler:{S:'Aufregung, kein Schmerz',E:'Augenzeuge des Ereignisses'},
+    vitals:{puls:jitter(92,0.05)+'/min',blutdruck:jitter(126,0.04)+'/80 mmHg',af:jitter(17,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, klagt über einen leichten Druckschmerz an der ${side} Hüfte.`,
+    befunde:`Leichte Prellung der ${side} Hüfte, freie Beweglichkeit, keine Schwellung.`,
+    sampler:{E:'Leichter Anprall gegen Gegenstand'},
+    vitals:{puls:jitter(82,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, zeigt Staub- und Schmutzspuren im Gesicht, sonst unauffällig.',
+    befunde:'Keine Verletzung feststellbar, lediglich Verschmutzung durch Staub, Patient allseits orientiert.',
+    sampler:{E:'Staubentwicklung in der Nähe'},
+    vitals:{puls:jitter(78,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt eine kleine Prellmarke am ${side} Knöchel.`,
+    befunde:`Kleine Prellmarke am ${side} Knöchel, keine Schwellung, volle Belastbarkeit.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Kleine Prellmarke'},
+    sampler:{E:'Leichtes Umknicken'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient sitzt ruhig auf einer Bordsteinkante, klagt über leichte Übelkeit nach dem Schreck.',
+    befunde:'Leichte Übelkeit ohne Erbrechen, keine körperliche Verletzung, Kreislauf stabil.',
+    sampler:{S:'Leichte Übelkeit',E:'Schreckreaktion'},
+    vitals:{puls:jitter(88,0.05)+'/min',blutdruck:jitter(122,0.04)+'/78 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt eine kleine Platzwunde am ${side} Kinn.`,
+    befunde:`Kleine, nicht mehr blutende Platzwunde am Kinn, keine weiteren Auffälligkeiten.`,
+    koerper:{kopf:'Kleine Platzwunde am Kinn'},
+    sampler:{E:'Leichter Sturz auf ebenem Untergrund'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht selbstständig, berichtet über kurzzeitigen Schwindel, der bereits wieder abgeklungen ist.',
+    befunde:'Kurzzeitiger, bereits abgeklungener Schwindel, keine Verletzung, aktuell beschwerdefrei.',
+    sampler:{S:'Kurzzeitiger Schwindel, jetzt abgeklungen',E:'Kreislaufreaktion durch Aufregung'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(112,0.04)+'/72 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, zeigt eine kleine Schwellung am ${side} Zeigefinger.`,
+    befunde:`Leichte Prellung des ${side} Zeigefingers, freie Beweglichkeit, keine Fehlstellung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Leichte Fingerprellung'},
+    sampler:{E:'Einklemmen des Fingers'},
+    vitals:{puls:jitter(80,0.05)+'/min',blutdruck:jitter(118,0.04)+'/76 mmHg',af:jitter(14,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient steht abseits, wirkt gefasst, keine sichtbaren Verletzungen, war nur in der Nähe des Ereignisses.',
+    befunde:'Keine Verletzung feststellbar, Patient unversehrt, wird zur Beobachtung mit erfasst.',
+    sampler:{E:'In der Nähe des Ereignisortes'},
+    vitals:{puls:jitter(76,0.05)+'/min',blutdruck:jitter(116,0.04)+'/74 mmHg',af:jitter(13,0.05)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gruen',{ersteindruck:`Patient läuft normal, klagt über einen leichten Muskelkater im ${side} Bein nach dem Weglaufen.`,
+    befunde:`Muskuläre Verspannung im ${side} Bein, keine strukturelle Verletzung, volle Belastbarkeit.`,
+    sampler:{E:'Schnelles Weglaufen von der Gefahrenstelle'},
+    vitals:{puls:jitter(90,0.05)+'/min',blutdruck:jitter(124,0.04)+'/80 mmHg',af:jitter(16,0.05)+'/min',spo2:jitter(99,0.01)+'%'}});},
+  ()=>mkBase('gruen',{ersteindruck:'Patient sitzt ruhig, zeigt kleine Rötungen der Haut, keine Blasenbildung.',
+    befunde:'Oberflächliche Hautrötung (Verbrennung Grad I) an kleiner Fläche, keine Blasenbildung.',
+    koerper:{armRechts:'Oberflächliche Hautrötung'},
+    sampler:{E:'Kurzer Kontakt mit heißer Oberfläche'},
+    vitals:{puls:jitter(84,0.05)+'/min',blutdruck:jitter(120,0.04)+'/78 mmHg',af:jitter(15,0.05)+'/min',spo2:jitter(99,0.01)+'%'}})
+];
+
+// ---- Kinder: gemeinsame Vorlagen für Baby/Kleinkind/Schulkind (Gelb/Grün) ----
+const TPL_KIND_GELB = [
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Kind weint, hält den ${side} Arm fest an den Körper gedrückt.`,
+    befunde:`Verdacht auf Unterarmfraktur ${side}, Schwellung, kein Hinweis auf weitere Verletzung.`,
+    koerper:{[side==='linken'?'armLinks':'armRechts']:'Verdacht auf Fraktur, Schwellung'},
+    xabcde:{D:'Wach, weinend, ansprechbar'},
+    vitals:{af:jitter(24,0.08)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Kind hustet, wirkt unruhig, war kurzzeitig in verrauchter Umgebung.',
+    befunde:'Leichte Rauchgasexposition, Sättigung grenzwertig, sonst unauffällig.',
+    xabcde:{B:`AF ${jitter(28,0.08)}/min`,D:'Wach, unruhig, weinend'},
+    vitals:{af:jitter(28,0.08)+'/min',spo2:jitter(93,0.02)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Kind hält sich weinend den Kopf, kleine Platzwunde sichtbar, war laut Begleitperson kurz benommen.',
+    befunde:'Kleine Kopfplatzwunde, kurzzeitige Benommenheit, aktuell wach und ansprechbar.',
+    koerper:{kopf:'Kleine Platzwunde, versorgt'},
+    xabcde:{D:'Wach, ansprechbar, Z.n. kurzer Benommenheit'},
+    vitals:{af:jitter(22,0.08)+'/min',spo2:jitter(97,0.01)+'%'}}),
+  ()=>{const side=pick(['linke','rechte']);
+    return mkBase('gelb',{ersteindruck:`Kind klagt über Schmerzen im ${side} Handgelenk nach Sturz.`,
+    befunde:`Schwellung ${side} Handgelenk, Verdacht auf Fraktur.`,
+    koerper:{[side==='linke'?'armLinks':'armRechts']:'Schwellung, Verdacht auf Fraktur'},
+    xabcde:{D:'Wach, weinend'},
+    vitals:{af:jitter(22,0.08)+'/min',spo2:jitter(98,0.01)+'%'}});},
+  ()=>{const side=pick(['linken','rechten']);
+    return mkBase('gelb',{ersteindruck:`Kind hinkt, hält sich das ${side} Knie, deutliche Schwellung sichtbar.`,
+    befunde:`Schwellung und Bewegungseinschränkung am ${side} Knie, Verdacht auf Bänderverletzung.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Schwellung, Bewegungseinschränkung'},
+    xabcde:{D:'Wach, weinend, ansprechbar'},
+    vitals:{af:jitter(22,0.08)+'/min',spo2:jitter(97,0.01)+'%'}});},
+  ()=>mkBase('gelb',{ersteindruck:'Kind hält sich den Brustkorb, atmet schmerzbedingt flach, keine äußere Verletzung sichtbar.',
+    befunde:'Prellung des Brustkorbs, atemabhängiger Schmerz, keine sichtbare äußere Verletzung.',
+    koerper:{thoraxVorne:'Prellmarke, Druckschmerz'},
+    xabcde:{B:`AF ${jitter(26,0.08)}/min, schmerzbedingt flach`,D:'Wach, weinend'},
+    vitals:{af:jitter(26,0.08)+'/min',spo2:jitter(96,0.01)+'%'}}),
+  ()=>mkBase('gelb',{ersteindruck:'Kind sitzt weinend am Boden, zeigt eine Verbrennung an der Hand, Haut gerötet mit kleinen Blasen.',
+    befunde:'Verbrennung 2. Grades an der Hand, kleinflächig, deutlicher Schmerz.',
+    koerper:{armLinks:'Verbrennung 2. Grades, kleinflächig'},
+    xabcde:{D:'Wach, weinend, starke Schmerzen'},
+    vitals:{af:jitter(24,0.08)+'/min',spo2:jitter(97,0.01)+'%'}})
+];
+const TPL_KIND_GRUEN = [
+  ()=>mkBase('gruen',{ersteindruck:'Kind weint, zeigt oberflächliche Schürfwunden an Knie und Ellenbogen.',
+    befunde:'Oberflächliche Schürfwunden, keine relevante Blutung, Kind lässt sich beruhigen.',
+    koerper:{beinLinks:'Oberflächliche Schürfwunde'},
+    xabcde:{D:'Wach, weinend, aber ansprechbar'},
+    vitals:{af:jitter(22,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind sitzt am Boden, wirkt verängstigt, keine sichtbaren äußeren Verletzungen.',
+    befunde:'Keine äußeren Verletzungen erkennbar, Kind ist verängstigt, sucht Nähe zu Bezugsperson.',
+    xabcde:{D:'Wach, ängstlich, ansprechbar'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind läuft selbstständig, zeigt eine kleine Beule am Kopf ohne weitere Auffälligkeiten.',
+    befunde:'Kleine Beule am Kopf (Hämatom), keine Bewusstseinsstörung, Kind spielt bereits wieder.',
+    koerper:{kopf:'Kleines Hämatom'},
+    xabcde:{D:'Wach, unauffällig'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind zeigt eine kleine, bereits nicht mehr blutende Schürfwunde am Unterarm.',
+    befunde:'Oberflächliche, spontan sistierte Schürfwunde, Kind unauffällig und ansprechbar.',
+    koerper:{armRechts:'Oberflächliche Schürfwunde'},
+    xabcde:{D:'Wach, ansprechbar'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind steht bei der Bezugsperson, zeigt einen kleinen Kratzer am Bein, spielt bereits weiter.',
+    befunde:'Oberflächlicher Kratzer am Bein, keine Blutung mehr, Kind unauffällig.',
+    koerper:{beinRechts:'Oberflächlicher Kratzer'},
+    xabcde:{D:'Wach, unauffällig, spielt bereits wieder'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind hält sich das Ohr, klagt kurz über Ohrensausen nach dem lauten Knall, sonst unauffällig.',
+    befunde:'Leichtes Ohrensausen nach Explosionsknall, kein Blut im Gehörgang, sonst unauffällig.',
+    xabcde:{D:'Wach, unauffällig'},
+    vitals:{af:jitter(20,0.07)+'/min',spo2:jitter(99,0.01)+'%'}}),
+  ()=>mkBase('gruen',{ersteindruck:'Kind sitzt bei der Bezugsperson, wirkt aufgeregt und weint leise, körperlich unverletzt.',
+    befunde:'Keine körperliche Verletzung feststellbar, Kind emotional aufgewühlt durch das Ereignis.',
+    xabcde:{D:'Wach, weinend, aber ansprechbar'},
+    vitals:{af:jitter(24,0.07)+'/min',spo2:jitter(99,0.01)+'%'}})
+];
+
+const TPL_KIND_ROT = [
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Kind liegt am Boden, hält sich schreiend den ${side} Oberschenkel, deutliche Fehlstellung.`,
+    befunde:`Geschlossene Oberschenkelfraktur ${side}, Kreislaufreaktion durch Schmerz und Blutverlust in den Muskel.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Geschlossene Fraktur, deutliche Schwellung'},
+    xabcde:{B:`AF ${jitter(28,0.1)}/min`,C:`Puls ${jitter(135,0.08)}/min, blass`,D:'Wach, weinend, starke Schmerzen'},
+    sampler:{S:'Starke Schmerzen, NRS 8/10',E:'Sturz/Trümmerlage'},
+    vitals:{puls:jitter(135,0.08)+'/min',blutdruck:jitter(95,0.07)+'/60 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>mkBase('rot',{ersteindruck:'Kind liegt benommen am Boden, hustet stark, Ruß im Gesicht, war in stark verrauchtem Raum.',
+    befunde:'Rußspuren um Mund und Nase, zunehmende Atemnot, beginnende Bewusstseinstrübung.',
+    koerper:{kopf:'Rußspuren um Mund/Nase'},
+    xabcde:{A:'Verdacht auf Inhalationstrauma, heisere Stimme',B:`AF ${jitter(32,0.1)}/min`,C:`Puls ${jitter(130,0.08)}/min`,D:'Zunehmend somnolent, GCS 13'},
+    sampler:{S:'Hustenreiz, Atemnot',E:'Rauchgasexposition in geschlossenem Raum'},
+    vitals:{puls:jitter(130,0.08)+'/min',blutdruck:jitter(100,0.06)+'/65 mmHg',af:jitter(32,0.1)+'/min',spo2:jitter(87,0.03)+'%',co:jitter(15,0.15)+'%'},
+    scores:{gcs:'13',news2:'7'}}),
+  ()=>mkBase('rot',{ersteindruck:'Kind liegt regungslos neben umgestürztem Gegenstand, blutet aus einer Kopfwunde.',
+    befunde:'Große Kopfplatzwunde, wiederholtes Erbrechen, verzögerte Reaktion auf Ansprache.',
+    koerper:{kopf:'Große Platzwunde, Schwellung, Blutung'},
+    xabcde:{B:`AF ${jitter(24,0.1)}/min`,C:`Puls ${jitter(128,0.08)}/min`,D:'Somnolent, GCS 12, wiederholtes Erbrechen'},
+    sampler:{S:'Kopfschmerzen, Übelkeit',E:'Sturz mit Kopfanprall'},
+    vitals:{puls:jitter(128,0.08)+'/min',blutdruck:jitter(105,0.07)+'/68 mmHg',af:jitter(24,0.1)+'/min',spo2:jitter(94,0.02)+'%'},
+    scores:{gcs:'12',news2:'6'}}),
+  ()=>mkBase('rot',{ersteindruck:'Kind sitzt gekrümmt am Boden, ringt sichtlich nach Luft, deutliche Zyanose der Lippen.',
+    befunde:'Einseitig abgeschwächtes Atemgeräusch, zunehmende Atemnot, Unruhe.',
+    koerper:{thoraxVorne:'Prellmarke, einseitig abgeschwächtes Atemgeräusch'},
+    xabcde:{B:`AF ${jitter(36,0.1)}/min, einseitig abgeschwächt`,C:`Puls ${jitter(140,0.08)}/min`,D:'Wach, sehr unruhig, ängstlich'},
+    sampler:{S:'Atemnot, Angst',E:'Sturz gegen Gegenstand, Thoraxanprall'},
+    vitals:{puls:jitter(140,0.08)+'/min',blutdruck:jitter(90,0.07)+'/58 mmHg',af:jitter(36,0.1)+'/min',spo2:jitter(85,0.03)+'%',rekap:'3 Sek.'},
+    scores:{news2:'8'}}),
+  ()=>{ const side=pick(['linken','rechten']);
+    return mkBase('rot',{ersteindruck:`Kind liegt am Boden, ${side} Unterschenkel deutlich fehlgestellt, starke Blutung sichtbar.`,
+    befunde:`Offene Unterschenkelfraktur ${side} mit deutlicher Blutung, Kind blass und geschwächt.`,
+    koerper:{[side==='linken'?'beinLinks':'beinRechts']:'Offene Fraktur, starke Blutung'},
+    xabcde:{X:`Deutliche Blutung am ${side} Unterschenkel`,C:`Puls ${jitter(138,0.08)}/min, blass`,D:'Wach, starke Schmerzen, ängstlich'},
+    sampler:{S:'Starke Schmerzen, NRS 9/10',E:'Sturz von umherfliegendem Trümmerteil getroffen'},
+    vitals:{puls:jitter(138,0.08)+'/min',blutdruck:jitter(92,0.07)+'/58 mmHg',af:jitter(26,0.1)+'/min',spo2:jitter(92,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'6'}});},
+  ()=>mkBase('rot',{ersteindruck:'Kind liegt reglos, deutliche Verbrennungen an Armen und Oberkörper, reagiert nur auf lautes Ansprechen.',
+    befunde:'Verbrennungen 2. Grades an Armen und Oberkörper, ca. 10% KOF, reduzierte Ansprechbarkeit.',
+    koerper:{thoraxVorne:'Verbrennung 2. Grades',armLinks:'Verbrennung 2. Grades'},
+    xabcde:{B:`AF ${jitter(30,0.1)}/min`,C:`Puls ${jitter(145,0.08)}/min`,D:'Reagiert nur auf lautes Ansprechen, GCS 11'},
+    sampler:{S:'Nur eingeschränkt erhebbar (reduzierte Ansprechbarkeit)',E:'Verbrühung/Verbrennung im Rahmen der Lage'},
+    vitals:{puls:jitter(145,0.08)+'/min',blutdruck:jitter(88,0.07)+'/56 mmHg',af:jitter(30,0.1)+'/min',spo2:jitter(90,0.02)+'%'},
+    scores:{gcs:'11',news2:'7'}}),
+  ()=>mkBase('rot',{ersteindruck:'Kind liegt auf dem Rücken, hält den Bauch, sehr blass und kaltschweißig, klagt über starke Bauchschmerzen.',
+    befunde:'Verdacht auf stumpfes Bauchtrauma mit innerer Blutung, deutliche Kreislaufreaktion.',
+    koerper:{thoraxVorne:'Druckschmerzhafter, gespannter Bauch'},
+    xabcde:{C:`Puls ${jitter(142,0.08)}/min, blass, kaltschweißig`,D:'Wach, starke Schmerzen, zunehmend unruhig'},
+    sampler:{S:'Starke Bauchschmerzen',E:'Anprall gegen Gegenstand'},
+    vitals:{puls:jitter(142,0.08)+'/min',blutdruck:jitter(85,0.07)+'/55 mmHg',af:jitter(28,0.1)+'/min',spo2:jitter(93,0.02)+'%',rekap:'3 Sek.'},
+    scores:{news2:'7'}})
+];
+
+function ageAdjustForChild(patient, ageGroup){
+  if(ageGroup==='baby'){
+    patient.gehfaehigkeit = 'nicht gehfähig (Säugling)';
+    patient.sampler = Object.assign({}, patient.sampler, {S:'nicht erhebbar (Säugling)',A:'nicht erhebbar',M:'nicht erhebbar',P:'nicht erhebbar',L:'nicht erhebbar',R:'nicht erhebbar (Säugling, keine Eigenanamnese möglich)'});
+    patient.vitals = Object.assign({}, patient.vitals, {puls:jitter(135,0.08)+'/min',blutdruck:'nicht ermittelbar',bz:'nicht ermittelbar'});
+    patient.scores.apgar = 'nicht relevant (kein Neugeborenes)';
+  }else if(ageGroup==='kleinkind'){
+    patient.gehfaehigkeit = patient.gehfaehigkeit==='gehfähig' ? 'eingeschränkt gehfähig (Kleinkind)' : patient.gehfaehigkeit;
+    patient.sampler = Object.assign({}, patient.sampler, {A:'nur über Begleitperson erhebbar',M:'nur über Begleitperson erhebbar',P:'nur über Begleitperson erhebbar',L:'nur über Begleitperson erhebbar'});
+    patient.vitals = Object.assign({}, patient.vitals, {puls:jitter(115,0.08)+'/min',blutdruck:'nicht ermittelbar'});
+  }else if(ageGroup==='schulkind'){
+    patient.sampler = Object.assign({}, patient.sampler, {A:'teilweise selbst, teilweise über Begleitperson erhebbar',M:'über Begleitperson erhebbar'});
+    patient.vitals = Object.assign({}, patient.vitals, {puls:jitter(95,0.08)+'/min'});
+  }
+  return patient;
+}
+
+function buildOnePatient(id, ageGroup, origin, cat){
+  const gender = pick(['männlich','weiblich']);
+  let pool;
+  if(ageGroup==='erwachsen'){
+    pool = cat==='rot' ? TPL_ERW_ROT : cat==='blau' ? TPL_ERW_BLAU : cat==='schwarz' ? TPL_ERW_SCHWARZ
+         : cat==='gelb' ? TPL_ERW_GELB : TPL_ERW_GRUEN;
+  }else{
+    pool = cat==='rot' ? TPL_KIND_ROT : cat==='gelb' ? TPL_KIND_GELB : TPL_KIND_GRUEN;
+  }
+  const patient = pick(pool)();
+  patient.kategorieReal = cat; // Absicherung: die vorgesehene Zielkategorie hat immer Vorrang
+  if(ageGroup!=='erwachsen') ageAdjustForChild(patient, ageGroup);
+
+  let alter;
+  if(ageGroup==='baby') alter = 0;
+  else if(ageGroup==='kleinkind') alter = 1+Math.floor(Math.random()*5);
+  else if(ageGroup==='schulkind') alter = 6+Math.floor(Math.random()*7);
+  else alter = 18+Math.floor(Math.random()*72);
+
+  patient.id = id;
+  patient.geschlecht = gender;
+  patient.alter = alter;
+  return patient;
+}
+
+function seedPatients(){
+  const total = 100;
+  const usedNames = new Set();
+  const usedBefunde = new Set();
+  const ageQueue = buildQuotaQueue(total, {baby:0.05, kleinkind:0.05, schulkind:0.05, erwachsen:0.85});
+  const originQueue = buildQuotaQueue(total, {auslaendisch:0.10, deutsch:0.90});
+
+  const childCount = ageQueue.filter(a=>a!=='erwachsen').length;
+  const adultCount = total - childCount;
+  // Kinder: zu gleichen Teilen Grün/Gelb/Rot (Rot fehlte hier bisher komplett).
+  const childCatQueue = buildQuotaQueue(childCount, {gruen:1/3, gelb:1/3, rot:1/3});
+  const adultGroupQueue = buildQuotaQueue(adultCount, {rotgroup:34/adultCount, gelb:25/adultCount, gruen:26/adultCount});
+  const rotgroupCount = adultGroupQueue.filter(g=>g==='rotgroup').length;
+  const rotSplitQueue = buildQuotaQueue(rotgroupCount, {rot:26/rotgroupCount, blau:4/rotgroupCount, schwarz:4/rotgroupCount});
+
+  let childCatI=0, adultGroupI=0, rotSplitI=0;
+  const patients = [];
+  for(let i=0;i<total;i++){
+    const ageGroup = ageQueue[i];
+    const origin = originQueue[i];
+    let cat;
+    if(ageGroup!=='erwachsen'){
+      cat = childCatQueue[childCatI++];
+    }else{
+      const g = adultGroupQueue[adultGroupI++];
+      cat = g==='rotgroup' ? rotSplitQueue[rotSplitI++] : g;
+    }
+    // Bis zu 25 Versuche: verhindert, dass zwei Patienten dasselbe Verletzungsbild
+    // (identischer "befunde"-Text) erhalten. Jeder Versuch würfelt Vorlage/Seite neu.
+    let patient, tries=0;
+    do{
+      patient = buildOnePatient(i+1, ageGroup, origin, cat);
+      tries++;
+    }while(usedBefunde.has(patient.befunde) && tries<25);
+    usedBefunde.add(patient.befunde);
+    const gender = patient.geschlecht;
+    const [vorname, nachname] = pickUniqueName(origin, gender, usedNames);
+    patient.vorname = vorname;
+    patient.nachname = nachname;
+    patients.push(patient);
+  }
+  return patients;
+}
+
+// Erzeugt die 100 Standardpatienten neu (z.B. nach einem Update der Vorlagen mit mehr Vielfalt)
+// und ERSETZT damit die komplette aktuelle Patientendatenbank. Nur über den Admin-Bereich nutzbar,
+// erfordert eine explizite Bestätigung durch den Admin.
+async function regenerateDefault100(){
+  if(!confirm('Wirklich ALLE aktuellen Patienten löschen und durch 100 neu erzeugte Standardpatienten ersetzen? Bereits erfasste Sichtungsergebnisse, die sich auf jetzige Patienten-IDs beziehen, zeigen danach ggf. auf andere Patienten. Dieser Schritt kann nicht rückgängig gemacht werden.')) return;
+  St.patients = seedPatients();
+  const ok = await saveKeyRetry('patients', St.patients);
+  if(ok){ toast('100 Standardpatienten neu erzeugt'); }
+  else{ toast('Fehler beim Speichern der neuen Patienten'); }
+  render();
+}
+
+/* ====================== NAV ====================== */
+function go(route){ St.route = route; render(); window.scrollTo(0,0); }
+
+function logout(){ St.user=null; St.currentExerciseId=null; St.currentRole=null; St.authToken=null; clearLoginSession(); clearExerciseSession(); go('login'); }
+
+/* ====================== AUTH ====================== */
+async function doLogin(username, password){
+  if(!username || !password){ toast('Bitte Benutzername und Passwort eingeben'); return; }
+  const apiResult = await callAuthApi({action:'login', username, password});
+  if(apiResult){
+    if(!apiResult.ok){ toast(apiResult.error||('Anmeldung fehlgeschlagen (unerwartete Antwort: '+JSON.stringify(apiResult).slice(0,150)+')')); return; }
+    St.user = apiResult.user;
+    St.users[apiResult.user.username] = apiResult.user;
+    St.authToken = apiResult.token;
+    saveLoginSession(apiResult.user, apiResult.token);
+    const handled = tryHandleDeepLink();
+    if(!handled){ go(apiResult.user.role==='admin' ? 'admin' : 'exercises'); }
+    return;
+  }
+  // Fallback: keine Server-Funktion konfiguriert -> rein lokale Prüfung
+  const u = St.users[username];
+  if(!u){ toast('Benutzer nicht gefunden'); return; }
+  if(u.locked){ toast('Konto gesperrt – bitte Admin kontaktieren'); return; }
+  if(!(await verifyPassword(u, password))){ toast('Passwort falsch'); return; }
+  if(!u.passwordHash){ await setPasswordHash(u, password); } // Alt-Konto: unbemerkt auf Hash umstellen
+  u.lastLogin = nowStamp();
+  await saveKey('users', St.users);
+  St.user = u;
+  saveLoginSession(u, null);
+  const handled = tryHandleDeepLink();
+  if(!handled){ go(u.role==='admin' ? 'admin' : 'exercises'); }
+}
+
+async function doRegister(username, password, email){
+  if(!username || !password || !email){ toast('Bitte alle Felder ausfüllen'); return; }
+  const apiResult = await callAuthApi({action:'register', username, password, email});
+  if(apiResult){
+    if(!apiResult.ok){ toast(apiResult.error||('Registrierung fehlgeschlagen (unerwartete Antwort: '+JSON.stringify(apiResult).slice(0,150)+')')); return; }
+    if(apiResult.emailSent){
+      St.pendingVerifyUsername = username;
+      go('registerPending');
+    }else{
+      toast('Registrierung erfolgreich – du kannst dich jetzt anmelden');
+      go('login');
+    }
+    return;
+  }
+  // Fallback: keine Server-Funktion konfiguriert -> lokale Registrierung ohne E-Mail-Verifizierung
+  // (echte Verifizierungs-Mails sind ohne Server-Funktion technisch nicht möglich)
+  if(St.users[username]){ toast('Benutzername bereits vergeben'); return; }
+  const newUser = {username, email, role:'teilnehmer', locked:false, createdAt:nowStamp(), lastLogin:null,
+    emailVerified:true};
+  await setPasswordHash(newUser, password);
+  St.users[username] = newUser;
+  await saveKey('users', St.users);
+  toast('Registrierung erfolgreich – du kannst dich jetzt anmelden');
+  go('login');
+}
+
+async function resendVerificationEmail(username){
+  const r = await callAuthApi({action:'resendVerification', username});
+  if(!r){ toast('Server nicht erreichbar'); return; }
+  if(!r.ok){ toast(r.error||'Fehler beim Senden'); return; }
+  toast('Bestätigungs-Mail erneut gesendet');
+}
+
+// ====================== SZENARIO-KLASSIFIZIERUNG & PATIENTENAUSWAHL ======================
+// Ordnet ein Szenario grob einer Ereignisart zu, damit bei der Übungserstellung nur
+// thematisch passende Patienten aus der Datenbank gezogen werden (z.B. keine
+// Durchfallerkrankung bei einer Explosion, keine Explosionsverletzungen bei einer
+// Lebensmittelvergiftung im Ferienlager).
+const TRAUMA_KEYWORDS = ['explosion','einsturz','unfall','verkehrsunfall','brand','feuer','absturz',
+  'schuss','amoklauf','anschlag','zugunglück','busunfall','flugzeugunglück','industrieunfall',
+  'gebäudeeinsturz','sturm','unwetter','massenkarambolage','crash','kollision','verschüttung','explosionsunglück'];
+const ERKRANKUNG_KEYWORDS = ['durchfall','erkrankung','infektion','lebensmittelvergiftung','virus',
+  'ausbruch','epidemie','vergiftung','norovirus','magen-darm','krankheitswelle','hitzschlag',
+  'hitzewelle','kollaps','übelkeit','seuche','kontamination'];
+
+function classifyScenario(text){
+  const t = (text||'').toLowerCase();
+  if(!t.trim()) return 'trauma'; // ohne Angabe: Standardannahme Trauma/MANV, da die 100 Basispatienten so angelegt sind
+  const traumaHits = TRAUMA_KEYWORDS.filter(k=>t.includes(k)).length;
+  const krankHits = ERKRANKUNG_KEYWORDS.filter(k=>t.includes(k)).length;
+  if(krankHits > traumaHits) return 'erkrankung';
+  return 'trauma';
+}
+
+// Wählt "count" Patienten aus der Gesamtdatenbank aus, die zum Szenario passen (per grober
+// Typ-Klassifizierung), und mischt sie zufällig. Reichen thematisch passende Patienten nicht
+// aus, wird mit den übrigen Patienten aufgefüllt (damit die gewünschte Anzahl immer erreicht
+// wird) und der Aufrufer per Rückgabewert "shortfall" informiert.
+function selectPatientsForExercise(scenarioText, count){
+  const typ = classifyScenario(scenarioText);
+  const matching = St.patients.filter(p=>(p.typ||'trauma')===typ);
+  const rest = St.patients.filter(p=>(p.typ||'trauma')!==typ);
+  function shuffle(arr){ const a=arr.slice(); for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+  const shuffledMatch = shuffle(matching);
+  let selected = shuffledMatch.slice(0, count);
+  let shortfall = 0;
+  if(selected.length < count){
+    shortfall = count - selected.length;
+    selected = selected.concat(shuffle(rest).slice(0, shortfall));
+  }
+  return { ids: selected.map(p=>p.id), typ, matchingAvailable: matching.length, shortfall };
+}
+
+/* ====================== EXERCISES ====================== */
+async function createExercise(name, scenario, ort, datum, uhrzeit, wetter, modus, patientCount){
+  if(!name){ toast('Name erforderlich'); return; }
+  const count = Math.max(1, parseInt(patientCount)||20);
+  const finalModus = (modus==='liste') ? 'liste' : 'qr';
+  const ex = {id:uid(), name, scenario, status:'entwurf', createdBy:St.user.username,
+    roles:[...PRESET_ROLES], participants:{}, createdAt:nowStamp(), log:[],
+    ort:ort||'', datum:datum||'', uhrzeit:uhrzeit||'', wetter:wetter||'', krankenhaeuser:[],
+    modus: finalModus, patientCount: count, patientIds: []};
+
+  if(finalModus==='liste'){
+    // Variante 2: feste, zum Szenario passende Auswahl aus der Patientendatenbank ziehen.
+    // Diese Auswahl bestimmt, welche Patienten-IDs auf der Patientenübersicht erscheinen.
+    const sel = selectPatientsForExercise(scenario, count);
+    ex.patientIds = sel.ids;
+    if(sel.shortfall > 0){
+      toast(`Hinweis: nur ${sel.matchingAvailable} passende Patienten gefunden, ${sel.shortfall} thematisch unpassende wurden ergänzt`);
+    }
+  }
+  // Variante 1 (QR): patientCount ist nur ein Planungswert. Welche Patienten tatsächlich
+  // Teil der Übung werden, ergibt sich ausschließlich daraus, welche QR-Codes gescannt
+  // werden — ex.patientIds bleibt daher bewusst leer/ungenutzt.
+
+  St.exercises.push(ex);
+  const ok = await saveKeyRetry('exercises', St.exercises);
+  if(!ok){
+    St.exercises.pop(); // lokale Änderung zurücknehmen, damit die Oberfläche keine "Phantom-Übung" zeigt
+    toast('Fehler: Übung konnte NICHT gespeichert werden (Datenbank-/Verbindungsfehler). Bitte erneut versuchen.');
+    render();
+    return;
+  }
+  toast('Übung erstellt');
+  render();
+}
+
+async function saveExerciseDetails(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const getVal = (id)=>{ const el = document.getElementById(id); return el ? el.value : ''; };
+  ex.name = getVal('exe__name') || ex.name;
+  ex.scenario = getVal('exe__scenario');
+  ex.ort = getVal('exe__ort');
+  ex.datum = getVal('exe__datum');
+  ex.uhrzeit = getVal('exe__uhrzeit');
+  ex.wetter = getVal('exe__wetter');
+  const modusEl = document.querySelector('input[name="exe__modus"]:checked');
+  if(modusEl) ex.modus = modusEl.value;
+  const pc = parseInt(getVal('exe__patientcount'));
+  if(pc && pc>0) ex.patientCount = pc;
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Übung konnte nicht gespeichert werden.'); return; }
+  toast('Übung gespeichert');
+  render();
+}
+
+// Wählt für eine bestehende Übung (Variante 2) die feste Patientenmenge neu — z.B. nachdem
+// das Szenario oder die Patientenanzahl geändert wurde. Ersetzt ex.patientIds komplett.
+async function regenerateExercisePatients(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const scenarioNow = document.getElementById('exe__scenario') ? document.getElementById('exe__scenario').value : ex.scenario;
+  const countNow = Math.max(1, parseInt(document.getElementById('exe__patientcount').value) || ex.patientCount || 20);
+  if(!confirm(`Wirklich ${countNow} neue Patienten für diese Übung auswählen? Die bisherige Zuordnung geht dabei verloren (bereits erfasste Sichtungen bleiben aber erhalten).`)) return;
+  const sel = selectPatientsForExercise(scenarioNow, countNow);
+  ex.patientIds = sel.ids;
+  ex.patientCount = countNow;
+  ex.scenario = scenarioNow;
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Neuauswahl konnte nicht gespeichert werden.'); return; }
+  if(sel.shortfall > 0){
+    toast(`Neu ausgewählt — Hinweis: nur ${sel.matchingAvailable} passende Patienten gefunden, ${sel.shortfall} wurden ergänzt`);
+  }else{
+    toast('Patienten neu ausgewählt');
+  }
+  openExerciseEditModal(exId);
+}
+
+async function addHospital(exId, name, km){
+  if(!name){ toast('Name des Krankenhauses erforderlich'); return; }
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  ex.krankenhaeuser = ex.krankenhaeuser || [];
+  ex.krankenhaeuser.push({id:uid(), name, km: km || '0'});
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Krankenhaus konnte nicht gespeichert werden.'); return; }
+  openExerciseEditModal(exId);
+}
+async function removeHospital(exId, hospId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  ex.krankenhaeuser = (ex.krankenhaeuser||[]).filter(h=>h.id!==hospId);
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Änderung konnte nicht gespeichert werden.'); return; }
+  openExerciseEditModal(exId);
+}
+async function deleteExercise(exId){
+  const backupExercises = St.exercises;
+  const backupSichtungen = St.sichtungen[exId];
+  St.exercises = St.exercises.filter(e=>e.id!==exId);
+  delete St.sichtungen[exId];
+  render(); // sofortiges optisches Feedback, wird bei Fehlschlag unten wieder rückgängig gemacht
+
+  const ok1 = await saveKeyRetry('exercises', St.exercises);
+  const ok2 = await saveKeyRetry('sichtungen_index', St.sichtungen);
+  if(!ok1 || !ok2){
+    // Rückgängig machen, damit die Oberfläche nicht fälschlich "gelöscht" zeigt,
+    // obwohl es in der Datenbank nicht wirklich gespeichert wurde.
+    St.exercises = backupExercises;
+    if(backupSichtungen !== undefined) St.sichtungen[exId] = backupSichtungen;
+    toast('Fehler: Übung konnte NICHT gelöscht werden (Datenbank-/Verbindungsfehler). Bitte erneut versuchen.');
+    render();
+    return;
+  }
+  toast('Übung gelöscht');
+  render();
+}
+
+async function setExerciseStatus(exId, status){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  ex.status = status;
+  ex.log = ex.log || [];
+  ex.log.push({event:'status:'+status, time:nowStamp(), timeMs:Date.now()});
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Status konnte nicht gespeichert werden.'); }
+  render();
+}
+
+async function saveBriefingDetails(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const getVal = (id)=>{ const el = document.getElementById(id); return el ? el.value : ''; };
+  ex.einsatzstichwort = getVal('bf__stichwort');
+  ex.alarmierteKraefte = getVal('bf__alarmiert');
+  ex.eingetroffeneKraefte = getVal('bf__eingetroffen');
+  ex.rueckmeldungen = getVal('bf__rueckmeldungen');
+  ex.aufstellflaeche = getVal('bf__aufstellflaeche');
+  ex.anfahrtswege = getVal('bf__anfahrt');
+  ex.einsatzstelleSicher = getVal('bf__sicher');
+  ex.einsatzgrenzen = getVal('bf__grenzen');
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Briefing konnte nicht gespeichert werden.'); return; }
+  toast('Briefing gespeichert');
+  render();
+}
+
+// Startet die Übung direkt aus dem Briefing heraus: setzt den Status auf "läuft" und
+// hinterlegt dabei einen eigenen, klar benannten Zeitstempel-Eintrag im Übungs-Log
+// ("Übung gestartet (Briefing abgeschlossen)"), der später im Debriefing/PDF-Bericht
+// chronologisch nachvollziehbar auftaucht. Speichert zusätzlich alle Briefing-Felder,
+// falls der Übungsleiter sie zuletzt noch geändert hatte, und springt danach automatisch
+// ins Übungsleiter-Cockpit dieser Übung.
+async function startExerciseFromBriefing(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const getVal = (id)=>{ const el = document.getElementById(id); return el ? el.value : ''; };
+  ex.einsatzstichwort = getVal('bf__stichwort');
+  ex.alarmierteKraefte = getVal('bf__alarmiert');
+  ex.eingetroffeneKraefte = getVal('bf__eingetroffen');
+  ex.rueckmeldungen = getVal('bf__rueckmeldungen');
+  ex.aufstellflaeche = getVal('bf__aufstellflaeche');
+  ex.anfahrtswege = getVal('bf__anfahrt');
+  ex.einsatzstelleSicher = getVal('bf__sicher');
+  ex.einsatzgrenzen = getVal('bf__grenzen');
+  ex.status = 'läuft';
+  ex.log = ex.log || [];
+  ex.log.push({event:'Übung gestartet (Briefing abgeschlossen)', time:nowStamp(), timeMs:Date.now()});
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Übung konnte nicht gestartet werden.'); return; }
+  toast('Übung gestartet');
+  St.currentExerciseId = exId;
+  go('cockpit');
+}
+
+async function joinExercise(exId, role){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  ex.participants[St.user.username] = role;
+  const okSave = await saveKeyRetry('exercises', St.exercises);
+  if(!okSave){ toast('Fehler: Beitritt konnte nicht gespeichert werden.'); return; }
+  St.currentExerciseId = exId;
+  St.currentRole = role;
+  saveExerciseSession();
+  if(St.deepLinkPatientAfterJoin){
+    const pid = St.deepLinkPatientAfterJoin;
+    St.deepLinkPatientAfterJoin = null;
+    openPatient(pid);
+  }else if((ex.modus||'qr')==='qr'){
+    go('depesche');
+  }else{
+    go('patients');
+  }
+}
+
+/* ====================== SICHTUNG ====================== */
+function openPatient(pid){
+  St.currentPatientId = pid;
+  St.reveal = {};
+  St.selectedBodyPart = null;
+  St.patientOpenedAtMs = Date.now(); // für Debriefing: Sichtungsdauer = Zeit bis zur ersten Kategorie-Vergabe
+  stopTimer();
+  setPatientUrlParam(St.currentExerciseId, pid);
+  go('sichtung');
+}
+function setPatientUrlParam(exId, pid){
+  try{
+    const url = new URL(location.href);
+    url.searchParams.set('ex', exId);
+    url.searchParams.set('pid', pid);
+    history.replaceState(null, '', url.pathname + url.search + location.hash);
+  }catch(e){}
+}
+function clearPatientUrlParam(){
+  try{
+    const url = new URL(location.href);
+    url.searchParams.delete('ex'); url.searchParams.delete('pid');
+    const q = url.search ? url.search : '';
+    history.replaceState(null, '', url.pathname + q + location.hash);
+  }catch(e){}
+}
+
+function selectBodyPart(key,label){
+  St.selectedBodyPart = {key,label};
+  render();
+}
+
+function startTimer(field, seconds){
+  if(St.timer.active){ toast('Es läuft bereits ein Timer!'); return; }
+  St.timer = {active:true, field, remaining:seconds, intervalId:null};
+  render();
+  St.timer.intervalId = setInterval(()=>{
+    St.timer.remaining -= 1;
+    if(St.timer.remaining <= 0){
+      clearInterval(St.timer.intervalId);
+      St.reveal[field] = true;
+      St.timer = {active:false, field:null, remaining:0, intervalId:null};
+    }
+    render();
+  },1000);
+}
+function stopTimer(){
+  if(St.timer.intervalId) clearInterval(St.timer.intervalId);
+  St.timer = {active:false, field:null, remaining:0, intervalId:null};
+}
+
+async function setTriage(cat){
+  const exId = St.currentExerciseId, pid = St.currentPatientId;
+  if(!exId || !pid) return;
+  St.sichtungen[exId] = St.sichtungen[exId] || [];
+  let rec = St.sichtungen[exId].find(r=>r.patientId===pid && r.username===St.user.username);
+  if(rec){ rec.kategorie = cat; rec.updatedAt = nowStamp(); rec.updatedAtMs = Date.now(); }
+  else{
+    // Sichtungsdauer nur bei der ERSTEN Kategorie-Vergabe für diesen Patienten festhalten
+    // (spätere Korrekturen der Kategorie sollen die einmal gemessene Dauer nicht verfälschen).
+    const dauerSekunden = St.patientOpenedAtMs ? Math.max(0, Math.round((Date.now()-St.patientOpenedAtMs)/1000)) : null;
+    St.sichtungen[exId].push({patientId:pid, username:St.user.username, role:St.currentRole,
+      kategorie:cat, timestamp:nowStamp(), timestampMs:Date.now(), updatedAt:nowStamp(), updatedAtMs:Date.now(),
+      dauerSekunden});
+  }
+  await saveKey('sichtungen_index', St.sichtungen);
+  render();
+}
+
+function myTriageFor(pid){
+  const exId = St.currentExerciseId;
+  const list = St.sichtungen[exId] || [];
+  const rec = list.find(r=>r.patientId===pid && r.username===St.user.username);
+  return rec ? rec.kategorie : null;
+}
+
+function myHospitalFor(pid){
+  const exId = St.currentExerciseId;
+  const list = St.sichtungen[exId] || [];
+  const rec = list.find(r=>r.patientId===pid && r.username===St.user.username);
+  return rec ? (rec.krankenhausId || null) : null;
+}
+
+async function assignHospital(hospId){
+  const exId = St.currentExerciseId, pid = St.currentPatientId;
+  if(!exId || !pid) return;
+  St.sichtungen[exId] = St.sichtungen[exId] || [];
+  let rec = St.sichtungen[exId].find(r=>r.patientId===pid && r.username===St.user.username);
+  if(!rec){
+    rec = {patientId:pid, username:St.user.username, role:St.currentRole,
+      kategorie:null, timestamp:nowStamp(), updatedAt:nowStamp(), krankenhausId:null};
+    St.sichtungen[exId].push(rec);
+  }
+  rec.krankenhausId = (rec.krankenhausId===hospId) ? null : hospId; // erneutes Klicken hebt Zuordnung auf
+  rec.updatedAt = nowStamp();
+  await saveKey('sichtungen_index', St.sichtungen);
+  render();
+}
+
+/* ====================== ADMIN: PATIENTS ====================== */
+
+/* ---- QR-Codes ---- */
+// Baut die URL, die im QR-Code steckt: enthält NUR die feste Patienten-ID (kein Übungsbezug).
+// So können einmal gedruckte QR-Codes für beliebig viele zukünftige Übungen wiederverwendet
+// werden — welcher Patient hinter einer ID steckt, wird stattdessen in der Patientendatenbank
+// festgelegt (Standard: fortlaufend 1-100, vom Admin änderbar).
+function patientQrUrl(pid){
+  const base = location.origin + location.pathname;
+  return `${base}?pid=${pid}`;
+}
+// Erzeugt synchron ein PNG-Data-URL eines QR-Codes für den gegebenen Text.
+function qrDataUrl(text, size){
+  size = size || 220;
+  const tempDiv = document.createElement('div');
+  tempDiv.style.position='fixed'; tempDiv.style.left='-9999px';
+  document.body.appendChild(tempDiv);
+  let dataUrl = '';
+  try{
+    new QRCode(tempDiv, {text: text, width:size, height:size, correctLevel: QRCode.CorrectLevel.M});
+    const canvas = tempDiv.querySelector('canvas');
+    if(canvas) dataUrl = canvas.toDataURL('image/png');
+  }catch(e){ console.error('QR-Code Erzeugung fehlgeschlagen', e); }
+  document.body.removeChild(tempDiv);
+  return dataUrl;
+}
+function showPatientQr(pid){
+  const url = patientQrUrl(pid);
+  const img = qrDataUrl(url, 220);
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="text-align:center;">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>QR-Code ID #${pid}</h2>
+      <img src="${img}" style="width:220px;height:220px;margin:10px 0;">
+      <p class="small" style="word-break:break-all;">${url}</p>
+      <p class="small">Dieser Code ist fest an die ID #${pid} gebunden und funktioniert für jede
+        zukünftige Übung — welcher Patient aktuell ID #${pid} trägt, legst du in der Patiententabelle fest.</p>
+      <button class="btn btn-primary" style="width:100%" onclick="exportQrPdf([${pid}])">Diesen QR-Code als PDF/Druck öffnen</button>
+    </div>
+  </div>`;
+  render();
+}
+// Öffnet ein Druckfenster mit einem QR-Code pro DIN-A4-Seite (patientIds=null -> alle Patienten).
+// Die Codes sind fest an die ID gebunden, nicht an eine bestimmte Übung — einmal drucken, immer wiederverwenden.
+function exportQrPdf(patientIds){
+  const ids = patientIds || St.patients.map(p=>p.id);
+  const pages = ids.map(pid=>{
+    const url = patientQrUrl(pid);
+    const img = qrDataUrl(url, 300);
+    return `<div class="qrpage"><div class="qrbox">
+      <div class="qrid">ID #${pid}</div>
+      <img src="${img}">
+      <div class="qrurl">${url}</div>
+    </div></div>`;
+  }).join('');
+  const html = `<html><head><meta charset="utf-8"><title>QR-Codes – mSTaRT Sichtungstrainer</title>
+  <style>
+    @page{ size:A4; margin:0; }
+    body{ font-family:sans-serif; margin:0; }
+    .qrpage{ width:210mm; height:297mm; display:flex; align-items:center; justify-content:center;
+      page-break-after:always; box-sizing:border-box; }
+    .qrbox{ text-align:center; }
+    .qrbox img{ width:300px; height:300px; }
+    .qrid{ font-size:34px; font-weight:800; margin-bottom:18px; font-family:sans-serif; }
+    .qrurl{ font-size:11px; color:#666; margin-top:10px; word-break:break-all; max-width:340px; }
+  </style></head><body>${pages}</body></html>`;
+  const w = window.open('', '_blank');
+  w.document.write(html); w.document.close(); w.focus();
+  setTimeout(()=>w.print(), 300); // kurze Pause, damit alle Bilder sicher geladen sind
+}
+
+async function deletePatient(pid){
+  St.patients = St.patients.filter(p=>p.id!==pid);
+  await saveKey('patients', St.patients);
+  render();
+}
+async function savePatientField(pid, path, value){
+  const p = St.patients.find(x=>x.id===pid); if(!p) return;
+  const parts = path.split('.');
+  let obj = p;
+  for(let i=0;i<parts.length-1;i++) obj = obj[parts[i]];
+  obj[parts[parts.length-1]] = value;
+  await saveKey('patients', St.patients);
+}
+
+const INJURY_HINTS = ['Schädel-Hirn-Trauma','Thoraxtrauma / Rippenserienfraktur','Bauchtrauma / innere Blutung',
+  'Amputationsverletzung Extremität','Verbrennung (großflächig)','Rauchgasinhalation','Wirbelsäulenverletzung',
+  'Beckenfraktur','Extremitätenfraktur Arm','Extremitätenfraktur Bein','Spritzende arterielle Blutung',
+  'Kreislaufschock / Sepsis','Krampfanfall','Psychischer Ausnahmezustand, leicht verletzt','Rauchvergiftung',
+  'Quetschverletzung / Verschüttung','Stichverletzung','Schuss-/Splitterverletzung','Ertrinkungsunfall',
+  'Unterkühlung', 'Leichtverletzt / Schürfwunden', 'Herz-Kreislauf-Stillstand', 'Atemnot / Asthmaanfall'];
+const ADULT_AGE_HINTS = ['junger Erwachsener (17-30 Jahre)','mittleres Alter (31-55 Jahre)',
+  'ältere Person (56-75 Jahre)','hochbetagt (76+ Jahre)'];
+const AGE_LABEL_MAP = {
+  baby:'Baby/Säugling (0-1 Jahre) – nicht gehfähig, keine eigenständige Anamnese möglich',
+  kleinkind:'Kleinkind (1-5 Jahre) – Gehfähigkeit/Anamnese stark eingeschränkt',
+  schulkind:'Schulkind (6-12 Jahre) – Anamnese nur eingeschränkt möglich'
+};
+const NAME_LABEL_MAP = {
+  auslaendisch:'ausländischer/internationaler Name (z.B. türkisch, polnisch, arabisch, ukrainisch, italienisch, russisch)',
+  deutsch:'typisch deutscher Name'
+};
+function pickRandom(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+// Verteilt "total" Einheiten nach vorgegebenen Prozentsätzen auf Kategorien (Largest-Remainder-Methode,
+// damit die Summe exakt "total" ergibt) und mischt das Ergebnis zu einer zufällig sortierten Warteschlange.
+function buildQuotaQueue(total, weightMap){
+  const keys = Object.keys(weightMap);
+  const exact = keys.map(k=>({key:k, exact: total*weightMap[k]}));
+  const counts = exact.map(e=>({key:e.key, count:Math.floor(e.exact), rem:e.exact-Math.floor(e.exact)}));
+  let assigned = counts.reduce((s,c)=>s+c.count,0);
+  counts.sort((a,b)=>b.rem-a.rem);
+  let i=0;
+  while(assigned<total){ counts[i%counts.length].count++; assigned++; i++; }
+  let queue = [];
+  counts.forEach(c=>{ for(let i2=0;i2<c.count;i2++) queue.push(c.key); });
+  for(let i3=queue.length-1;i3>0;i3--){ const j=Math.floor(Math.random()*(i3+1)); [queue[i3],queue[j]]=[queue[j],queue[i3]]; }
+  return queue;
+}
+
+async function generatePatientsAI(count, scenario, pctRot, pctGelb, pctGruen){
+  if(St.aiBusy){ return; }
+  St.aiBusy = true; St.aiProgress = 'Starte Generierung…'; St.aiLastError = null; render();
+  const batchSize = 1; // 1 Patient pro Aufruf, damit die Antwort sicher innerhalb des Token-Limits bleibt
+  let created = 0;
+  let failed = 0;
+  let nextId = St.patients.length ? Math.max(...St.patients.map(p=>p.id))+1 : 1;
+  const total = count;
+  let stopAll = false;
+
+  // Feste Quoten für diesen Generierungslauf: 5% Baby, 5% Kleinkind, 5% Schulkind, 85% Erwachsene;
+  // unabhängig davon 10% ausländische, 90% deutsche Namen.
+  const ageQueue = buildQuotaQueue(total, {baby:0.05, kleinkind:0.05, schulkind:0.05, erwachsen:0.85});
+  const originQueue = buildQuotaQueue(total, {auslaendisch:0.10, deutsch:0.90});
+
+  while(created < total && !stopAll){
+    const thisBatch = Math.min(batchSize, total-created);
+    St.aiProgress = `Erzeuge Patient ${created+1} von ${total}…`; render();
+
+    // Bereits vorhandene Namen/Verletzungen sammeln, damit die KI diese nicht wiederholt
+    const existingNames = St.patients.map(p=>`${p.vorname} ${p.nachname}`).slice(-40);
+    const existingInjuries = St.patients.map(p=>p.befunde).filter(Boolean).slice(-40);
+
+    // Feste Vorgabe für DIESEN Patienten aus der vorab verteilten Quote (statt reinem Zufall)
+    const ageKey = ageQueue[created] || 'erwachsen';
+    const originKey = originQueue[created] || 'deutsch';
+    const ageHint = ageKey==='erwachsen' ? pickRandom(ADULT_AGE_HINTS) : AGE_LABEL_MAP[ageKey];
+    const nameHint = NAME_LABEL_MAP[originKey];
+    const injuryHint = pickRandom(INJURY_HINTS);
+    const randomSeed = uid();
+
+    const catHint = `Verteile die Sichtungskategorien über alle generierten Patienten ungefähr so: ${pctRot}% Rot/Blau/Schwarz (kritisch/tot), ${pctGelb}% Gelb, ${pctGruen}% Grün.`;
+    const varietyHint = `Für DIESEN Patienten gelten folgende Vorgaben VERBINDLICH (nicht abweichen): Altersgruppe: "${ageHint}". Namensherkunft: "${nameHint}". Verletzungsschwerpunkt tendenziell (als Inspiration, kreativ anpassbar an Szenario "${scenario}"): "${injuryHint}". Bei Baby/Kleinkind/Schulkind: Gehfähigkeit und SAMPLER-Anamnese entsprechend altersgerecht einschränken (ggf. "nicht erhebbar" oder nur über Begleitperson). Zufalls-Kennung (ignorieren, nur zur Variation): ${randomSeed}.`;
+    const avoidHint = existingNames.length
+      ? `Bereits vergebene Namen – NICHT erneut verwenden oder leicht abwandeln: ${existingNames.join(', ')}. Bereits vergebene Verletzungsbilder – erzeuge etwas UNTERSCHIEDLICHES davon: ${existingInjuries.join(' | ')}.`
+      : '';
+
+    const sys = `Du erzeugst fiktive Notfallpatienten für eine ManV-Sichtungsübung (mSTaRT-Schema) zum Szenario "${scenario}". Antworte AUSSCHLIESSLICH mit einem JSON-Array (keine Erklärung, kein Markdown, kein Codeblock), das genau ${thisBatch} Patientenobjekt(e) enthält. Jedes Objekt hat exakt dieses Schema:
+{"vorname":"","nachname":"","alter":0,"geschlecht":"männlich|weiblich|divers",
+"ersteindruck":"","gehfaehigkeit":"gehfähig|nicht gehfähig|...",
+"befunde":"",
+"koerper":{"kopf":"","thoraxVorne":"","thoraxHinten":"","armLinks":"","armRechts":"","beinLinks":"","beinRechts":""},
+"xabcde":{"X":"","A":"","B":"","C":"","D":"","E":""},
+"sampler":{"S":"","A":"","M":"","P":"","L":"","E":"","R":""},
+"vitals":{"puls":"","blutdruck":"","rekap":"","af":"","spo2":"","bz":"","temp":"","etco2":"","hb":"","co":"","spmet":""},
+"scores":{"gcs":"","befast":"","news2":"","nexus":"","qsofa":"","spesi":"","wells":"","apgar":""},
+"kategorieReal":"rot|gelb|gruen|blau|schwarz"}
+WICHTIG: Halte JEDEN Textwert sehr kurz und knapp (max. ca. 8-10 Wörter, Stichwort-Stil statt ganzer Sätze), damit die gesamte Antwort kurz bleibt. Alle Werte müssen trotzdem medizinisch realistisch und konsistent zum jeweiligen Verletzungs-/Erkrankungsbild sein. Nicht erhebbare/irrelevante Werte als "nicht ermittelbar" bzw. leerer String bei körper-Feldern ohne Verletzung. Halte dich STRIKT an die oben als verbindlich markierte Altersgruppe und Namensherkunft für diesen Patienten. Gelegentlich kann der Patient zusätzlich bewusstlos sein (dann Anamnesefelder "nicht erhebbar") – das ist unabhängig von Alter/Herkunft und optional. ZWEI ZWINGENDE MEDIZINISCHE REGELN: (1) Das Feld "gehfaehigkeit" darf NUR bei kategorieReal="gruen" den Wert "gehfähig" enthalten – bei ALLEN anderen Kategorien (gelb, rot, blau, schwarz) MUSS es "nicht gehfähig" (oder eine Variante davon) sein, niemals "gehfähig". (2) Ist der Patient bewusstlos/reagiert nicht/regungslos, MUSS scores.gcs einen Wert von 3-8 haben und xabcde.D darf NICHT "wach"/"orientiert"/"GCS 15" enthalten – ein bewusstloser Patient hat NIEMALS GCS 15. ${catHint} ${varietyHint} ${avoidHint} JEDER Patient muss sich in Name UND Verletzungsbild klar von allen bisherigen unterscheiden.`;
+
+    let ok = false;
+    for(let attempt=1; attempt<=2 && !ok && !stopAll; attempt++){
+      try{
+        // WICHTIG: Ruft NICHT mehr direkt api.anthropic.com auf (das würde den API-Key im Browser
+        // erfordern und wäre unsicher). Stattdessen wird eine eigene, serverseitige Funktion aufgerufen,
+        // die den API-Key sicher hält. Siehe DEPLOYMENT.md, Schritt 4.
+        const resp = await fetch("/.netlify/functions/generate-patient",{
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({
+            max_tokens:1000, temperature:1,
+            messages:[{role:"user", content: sys}]
+          })
         });
+        const data = await resp.json();
+        if(resp.status===429){
+          const resetsAt = data && data.resolved && data.resolved.limit && data.resolved.limit.resets_at;
+          let resetTxt = '';
+          if(resetsAt){
+            try{ resetTxt = ' Verfügbar wieder ab ca. ' + new Date(resetsAt).toLocaleString('de-DE'); }catch(e){}
+          }
+          throw Object.assign(new Error('Nutzungslimit erreicht (HTTP 429).'+resetTxt+' Das ist kein Fehler in der App, sondern das Anfrage-Limit deines Claude-Zugangs — bitte später erneut versuchen.'), {isRateLimit:true});
+        }
+        if(!resp.ok){
+          const apiMsg = (data && data.error && data.error.message) ? data.error.message : JSON.stringify(data).slice(0,300);
+          throw new Error(`API-Fehler (HTTP ${resp.status}): ${apiMsg}`);
+        }
+        if(!data.content || !data.content.length){
+          throw new Error('Antwort enthielt keinen Inhalt: ' + JSON.stringify(data).slice(0,300));
+        }
+        let text = data.content.map(b=>b.text||'').join('');
+        text = text.replace(/```json|```/g,'').trim();
+        if(!text){ throw new Error('Leere Textantwort erhalten'); }
+
+        let arr;
+        try{
+          arr = JSON.parse(text);
+        }catch(parseErr){
+          // Antwort wurde vermutlich abgeschnitten (max_tokens erreicht) -> reparieren:
+          // letztes vollständiges Objekt im Array suchen und den Rest verwerfen
+          const lastComplete = text.lastIndexOf('}');
+          if(lastComplete === -1) throw new Error('JSON konnte nicht geparst werden: '+parseErr.message+' | Antwort: '+text.slice(0,200));
+          let repaired = text.slice(0, lastComplete+1);
+          if(!repaired.trim().startsWith('[')) repaired = '['+repaired;
+          repaired = repaired + ']';
+          arr = JSON.parse(repaired);
+        }
+        if(!Array.isArray(arr) || !arr.length){ throw new Error('Antwort war kein gültiges Patienten-Array'); }
+
+        // Grobe Dublettenprüfung: falls Name bereits existiert, Versuch als Fehlschlag werten und erneut versuchen
+        const dup = arr.some(pat => St.patients.some(ex =>
+          ex.vorname===pat.vorname && ex.nachname===pat.nachname));
+        if(dup && attempt<2){ throw new Error('Duplikat erkannt, erneuter Versuch'); }
+
+        arr.forEach(pat=>{
+          pat.id = nextId++;
+          pat.typ = classifyScenario(scenario);
+          pat.szenarioTags = scenario || '';
+          St.patients.push(pat);
+        });
+        created += arr.length;
+        const saved = await saveKeyRetry('patients', St.patients);
+        if(!saved){ throw new Error('Speichern der Patienten ist fehlgeschlagen (Serverfehler). Bitte erneut versuchen.'); }
+        St.aiLastError = null;
+        ok = true;
+      }catch(e){
+        console.error('Generierung fehlgeschlagen (Versuch '+attempt+')', e);
+        St.aiLastError = e && e.message ? e.message : String(e);
+        if(e && e.isRateLimit){
+          stopAll = true;
+          failed += (total-created);
+          created = total; // Schleife sofort beenden, keine weiteren sinnlosen Versuche
+        }
+        St.aiProgress = `Versuch ${attempt} fehlgeschlagen: ${St.aiLastError}`; render();
+        if(attempt===2 && !stopAll){
+          failed += thisBatch;
+          created += thisBatch; // Zähler trotzdem weiterlaufen lassen, um Endlosschleife zu vermeiden
+        }
       }
+      if(!ok && !stopAll){ await new Promise(r=>setTimeout(r, 400)); } // kurze Pause zwischen Versuchen
+    }
+  }
 
-      heading("Fazit");
-      const s = data.stats || {};
-      kvRow("Gesamtzeit der Übung", s.gesamtzeitText);
-      kvRow("Ø Sichtungszeit pro Patient", s.avgDurationText);
-      kvRow("Gesichtete Patienten gesamt", s.totalGesichtet);
-      kvRow("Richtig gesichtet", s.correct);
-      kvRow("Falsch gesichtet", s.wrong);
+  St.aiBusy = false; St.aiProgress='';
+  if(failed>0){
+    toast(`${created-failed} Patient(en) erzeugt, ${failed} fehlgeschlagen`);
+  }else{
+    toast(`${created} Patient(en) erzeugt`);
+  }
+  render();
+}
 
-      doc.end();
-    } catch (e) { reject(e); }
+/* ====================== ADMIN: USERS ====================== */
+async function refreshUsersFromApi(){
+  if(!St.authToken) return false;
+  const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'listUsers'});
+  if(!r || !r.ok) return false;
+  const fresh = {};
+  r.users.forEach(u=>{ fresh[u.username] = u; });
+  St.users = fresh;
+  return true;
+}
+async function goAdminTab(tab){
+  St.adminTab = tab;
+  render();
+  if(tab==='nutzer'){
+    const changed = await refreshUsersFromApi();
+    if(changed) render();
+  }
+  if(tab==='zertifikate'){
+    await ensureCertData();
+    render();
+  }
+}
+
+async function toggleLock(username){
+  const u = St.users[username]; if(!u) return;
+  if(St.authToken){
+    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'toggleLock', opPayload:{username}});
+    if(r){ if(!r.ok){ toast(r.error||'Fehler'); return; } u.locked = r.locked; render(); return; }
+  }
+  u.locked = !u.locked;
+  await saveKey('users', St.users);
+  render();
+}
+async function deleteUser(username){
+  if(username===PROTECTED_ADMIN_USERNAME){ toast(`Der Admin "${PROTECTED_ADMIN_USERNAME}" kann nicht gelöscht werden.`); return; }
+  if(St.user && St.user.username===username){ toast('Du kannst dein eigenes Konto hier nicht löschen'); return; }
+  if(St.authToken){
+    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'deleteUser', opPayload:{username}});
+    if(r){ if(!r.ok){ toast(r.error||'Fehler'); return; } delete St.users[username]; toast('Nutzer gelöscht'); render(); return; }
+  }
+  delete St.users[username];
+  await saveKey('users', St.users);
+  render();
+}
+function openSetPasswordModal(username){
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Neues Passwort für ${username}</h2>
+      <div class="field"><label>Neues Passwort</label><input id="np-pass" type="text" placeholder="Mindestens 3 Zeichen"></div>
+      <p class="small">Das Passwort wird sofort gesetzt. Da kein echter E-Mail-Versand des Passworts selbst
+        vorgesehen ist, teile es dem Nutzer bitte auf einem sicheren Weg selbst mit.</p>
+      <button class="btn btn-primary" style="width:100%" onclick="setUserPassword('${username}', document.getElementById('np-pass').value)">Passwort setzen</button>
+    </div>
+  </div>`;
+  render();
+}
+async function setUserPassword(username, newPassword){
+  if(!newPassword || newPassword.length<3){ toast('Bitte ein Passwort mit mindestens 3 Zeichen eingeben'); return; }
+  if(St.authToken){
+    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'setPassword', opPayload:{username, newPassword}});
+    if(r){ if(!r.ok){ toast(r.error||'Fehler'); return; } toast('Passwort für '+username+' aktualisiert'); closeModal(); return; }
+  }
+  const u = St.users[username]; if(!u) return;
+  await setPasswordHash(u, newPassword);
+  await saveKey('users', St.users);
+  toast('Passwort für '+username+' aktualisiert');
+  closeModal();
+}
+async function assignRole(username, role){
+  const u = St.users[username]; if(!u) return;
+  if(St.authToken){
+    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'assignRole', opPayload:{username, role}});
+    if(r){ if(!r.ok){ toast(r.error||'Fehler'); render(); return; } u.role = role; render(); return; }
+  }
+  u.role = role;
+  await saveKey('users', St.users);
+  render();
+}
+
+function openCreateUserModal(){
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Neuen Nutzer anlegen</h2>
+      <div class="field"><label>Benutzername</label><input id="cu-user"></div>
+      <div class="field"><label>Passwort</label><input id="cu-pass" type="text" placeholder="Mindestens 3 Zeichen"></div>
+      <div class="field"><label>E-Mail</label><input id="cu-mail" type="email"></div>
+      <div class="field"><label>Rolle</label>
+        <select id="cu-role">
+          <option value="teilnehmer">teilnehmer</option>
+          <option value="uebungsleiter">uebungsleiter</option>
+          <option value="admin">admin</option>
+        </select>
+      </div>
+      <div class="field"><label>Signatur-ID (für Zertifikate, optional)</label>
+        <input id="cu-signatur" placeholder="z.B. 01 (Bilddatei 01.jpg im images-Ordner)"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="createUserByAdmin(
+        document.getElementById('cu-user').value,
+        document.getElementById('cu-pass').value,
+        document.getElementById('cu-mail').value,
+        document.getElementById('cu-role').value,
+        document.getElementById('cu-signatur').value)">Nutzer anlegen</button>
+    </div>
+  </div>`;
+  render();
+}
+async function createUserByAdmin(username, password, email, role, signaturId){
+  username = (username||'').trim();
+  if(!username || !password || password.length<3){ toast('Benutzername und ein Passwort mit mind. 3 Zeichen erforderlich'); return; }
+  if(St.authToken){
+    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'createUser', opPayload:{username, password, email, role, signaturId}});
+    if(r){
+      if(!r.ok){ toast(r.error||'Fehler'); return; }
+      await refreshUsersFromApi();
+      toast('Nutzer '+username+' angelegt');
+      closeModal();
+      return;
+    }
+  }
+  if(St.users[username]){ toast('Benutzername bereits vergeben'); return; }
+  const newUser = {username, email:email||'', role: role||'teilnehmer', locked:false,
+    createdAt:nowStamp(), lastLogin:null, emailVerified:true, signaturId: signaturId||''};
+  await setPasswordHash(newUser, password);
+  St.users[username] = newUser;
+  const ok = await saveKeyRetry('users', St.users);
+  if(!ok){ delete St.users[username]; toast('Fehler: Nutzer konnte nicht gespeichert werden'); render(); return; }
+  toast('Nutzer '+username+' angelegt');
+  closeModal();
+}
+
+function openEditUserModal(username){
+  const u = St.users[username]; if(!u) return;
+  const isSelf = St.user && St.user.username===username;
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Nutzer bearbeiten</h2>
+      <div class="field"><label>Benutzername</label><input id="eu-user" value="${u.username}"></div>
+      <div class="field"><label>E-Mail</label><input id="eu-mail" type="email" value="${u.email||''}"></div>
+      <div class="field"><label>Rolle</label>
+        <select id="eu-role" ${(isSelf || u.username===PROTECTED_ADMIN_USERNAME)?'disabled':''}>
+          ${['teilnehmer','uebungsleiter','admin'].map(r=>`<option value="${r}" ${u.role===r?'selected':''}>${r}</option>`).join('')}
+        </select>
+      </div>
+      ${isSelf?'<p class="small">Du kannst deine eigene Rolle und deinen eigenen Sperrstatus hier nicht ändern.</p>':''}
+      <div class="field"><label>Status</label>
+        <select id="eu-locked" ${isSelf?'disabled':''}>
+          <option value="0" ${!u.locked?'selected':''}>aktiv</option>
+          <option value="1" ${u.locked?'selected':''}>gesperrt</option>
+        </select>
+      </div>
+      <div class="field"><label>Signatur-ID (für Zertifikate, optional)</label>
+        <input id="eu-signatur" value="${u.signaturId||''}" placeholder="z.B. 01 (Bilddatei 01.jpg im images-Ordner)"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="saveEditedUser('${u.username}')">Änderungen speichern</button>
+    </div>
+  </div>`;
+  render();
+}
+async function saveEditedUser(oldUsername){
+  const u = St.users[oldUsername]; if(!u) return;
+  const isSelf = St.user && St.user.username===oldUsername;
+  const getVal = (id)=>{ const el = document.getElementById(id); return el ? el.value : ''; };
+  const newUsername = (getVal('eu-user')||oldUsername).trim();
+  const newEmail = getVal('eu-mail');
+  const newRole = (isSelf || u.username===PROTECTED_ADMIN_USERNAME) ? u.role : getVal('eu-role');
+  const newLocked = isSelf ? !!u.locked : getVal('eu-locked')==='1';
+  const newSignaturId = getVal('eu-signatur');
+
+  if(!newUsername){ toast('Benutzername darf nicht leer sein'); return; }
+  if(newUsername!==oldUsername && St.users[newUsername]){ toast('Dieser Benutzername ist bereits vergeben'); return; }
+  if(oldUsername===PROTECTED_ADMIN_USERNAME && newUsername!==oldUsername){
+    toast(`Der Admin "${PROTECTED_ADMIN_USERNAME}" kann nicht umbenannt werden.`); return;
+  }
+
+  if(St.authToken){
+    const r = await callAuthApi({action:'adminOp', token:St.authToken, op:'editUser', opPayload:{
+      oldUsername, newUsername: newUsername!==oldUsername?newUsername:undefined, email:newEmail, role:newRole, locked:newLocked, signaturId:newSignaturId
+    }});
+    if(r){
+      if(!r.ok){ toast(r.error||'Fehler'); return; }
+      await refreshUsersFromApi();
+      if(isSelf && r.finalUsername && r.finalUsername!==oldUsername){
+        St.user = St.users[r.finalUsername];
+        saveLoginSession(St.user, St.authToken);
+      }
+      toast('Nutzer gespeichert');
+      closeModal();
+      return;
+    }
+  }
+
+  // Fallback ohne Server-Funktion
+  if(newUsername !== oldUsername){
+    delete St.users[oldUsername];
+    u.username = newUsername;
+    St.users[newUsername] = u;
+    St.exercises.forEach(ex=>{
+      if(ex.participants && ex.participants[oldUsername]!==undefined){
+        ex.participants[newUsername] = ex.participants[oldUsername];
+        delete ex.participants[oldUsername];
+      }
+      if(ex.createdBy===oldUsername) ex.createdBy = newUsername;
+    });
+    Object.keys(St.sichtungen).forEach(exId=>{
+      (St.sichtungen[exId]||[]).forEach(rec=>{
+        if(rec.username===oldUsername) rec.username = newUsername;
+      });
+    });
+    if(isSelf){ St.user = St.users[newUsername]; saveLoginSession(St.user, null); }
+    await saveKey('exercises', St.exercises);
+    await saveKey('sichtungen_index', St.sichtungen);
+  }
+  u.email = newEmail;
+  u.role = newRole;
+  u.locked = newLocked;
+  u.signaturId = newSignaturId;
+  const ok = await saveKeyRetry('users', St.users);
+  if(!ok){ toast('Fehler: Änderungen konnten nicht gespeichert werden'); render(); return; }
+  toast('Nutzer gespeichert');
+  closeModal();
+}
+
+/* ====================== PDF / PRINT EXPORT ====================== */
+function exportExercisePdf(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const list = (St.sichtungen[exId]||[]).slice().sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
+  const rows = list.map(r=>{
+    const p = St.patients.find(pp=>pp.id===r.patientId);
+    const match = r.kategorie ? (p && p.kategorieReal===r.kategorie ? 'stimmt überein' : 'weicht ab') : '-';
+    const hosp = r.krankenhausId ? (ex.krankenhaeuser||[]).find(h=>h.id===r.krankenhausId) : null;
+    return `<tr><td>${r.timestamp}</td><td>${r.username}</td><td>${r.role}</td><td>Patient ${r.patientId}</td>
+      <td>${r.kategorie?CAT_LABEL[r.kategorie]:'noch keine Sichtung'}</td><td>${p?CAT_LABEL[p.kategorieReal]:'-'}</td><td>${match}</td><td>${hosp?hosp.name:'-'}</td></tr>`;
+  }).join('');
+  const logRows = (ex.log||[]).slice().sort((a,b)=>a.time.localeCompare(b.time))
+    .map(l=>`<tr><td>${l.time}</td><td>${l.event}</td></tr>`).join('');
+  const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+  const hospList = (ex.krankenhaeuser||[]).map(h=>`${h.name} (${h.km} km)`).join(', ') || '-';
+  const briefingRows = [
+    ['Einsatzstichwort', ex.einsatzstichwort], ['Alarmierte Kräfte', ex.alarmierteKraefte],
+    ['Eingetroffene Kräfte', ex.eingetroffeneKraefte], ['Rückmeldungen', ex.rueckmeldungen],
+    ['Aufstellfläche', ex.aufstellflaeche], ['Anfahrtswege', ex.anfahrtswege],
+    ['Einsatzstelle', ex.einsatzstelleSicher], ['Einsatzgrenzen / Gefahrenbereiche', ex.einsatzgrenzen]
+  ].filter(([,v])=>v).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  const html = `<html><head><meta charset="utf-8"><title>${ex.name} – Übungsbericht</title>
+  <style>body{font-family:sans-serif;padding:24px;} h1{margin-bottom:2px;} h2{margin-top:28px;} table{width:100%;border-collapse:collapse;margin-top:16px;}
+  th,td{border:1px solid #999;padding:6px 8px;font-size:13px;text-align:left;} th{background:#eee;}</style></head>
+  <body><h1>Übungsbericht: ${ex.name}</h1>
+  <p>Szenario: ${ex.scenario||'-'}<br>${meta?meta+'<br>':''}Status: ${ex.status}<br>Erstellt von: ${ex.createdBy}<br>Krankenhäuser: ${hospList}<br>Exportiert: ${nowStamp()}</p>
+  ${briefingRows?`<h2>Briefing-Angaben</h2><table><tbody>${briefingRows}</tbody></table>`:''}
+  <h2>Verlauf (Debriefing-Zeitstempel)</h2>
+  <table><thead><tr><th>Zeitstempel</th><th>Ereignis</th></tr></thead>
+  <tbody>${logRows || '<tr><td colspan="2">Kein Verlauf erfasst</td></tr>'}</tbody></table>
+  <h2>Sichtungsergebnisse</h2>
+  <table><thead><tr><th>Zeitstempel</th><th>Teilnehmer</th><th>Rolle</th><th>Patient</th><th>Gesichtet mit</th><th>Reale Kategorie</th><th>Abgleich</th><th>Krankenhaus</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="8">Noch keine Sichtungen</td></tr>'}</tbody></table>
+  </body></html>`;
+  const w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  w.print();
+}
+
+/* ====================== RENDER: LOGIN / REGISTER ====================== */
+function viewSetup(){
+  return `
+  <div class="wrap-narrow">
+    <div style="text-align:center;margin-bottom:26px;">
+      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> mSTaRT Sichtungstrainer</div>
+    </div>
+    <div class="card" style="border-left:5px solid var(--yellow);">
+      <div class="small" style="letter-spacing:.1em;text-transform:uppercase;color:var(--navy);font-weight:800;">🔧 Ersteinrichtung</div>
+      <h2 style="margin-top:6px;">Erstes Admin-Konto anlegen</h2>
+      <p class="small">Es existiert noch kein Benutzerkonto in diesem System. Lege jetzt dein eigenes
+        Administrator-Konto an — es gibt bewusst kein voreingestelltes Standard-Konto mehr.</p>
+      <div class="field"><label>Benutzername</label><input id="su-user"></div>
+      <div class="field"><label>Passwort</label><input id="su-pass" type="password" placeholder="Mindestens 6 Zeichen"></div>
+      <div class="field"><label>Passwort bestätigen</label><input id="su-pass2" type="password"></div>
+      <div class="field"><label>E-Mail</label><input id="su-mail" type="email"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="submitSetup(
+        document.getElementById('su-user').value,
+        document.getElementById('su-pass').value,
+        document.getElementById('su-pass2').value,
+        document.getElementById('su-mail').value)">Admin-Konto anlegen</button>
+      <p style="text-align:center;margin-top:14px;">Es existiert doch schon ein Konto? <a href="#" onclick="go('login');return false;" style="color:var(--blue);font-weight:700;">Zur Anmeldung</a></p>
+    </div>
+  </div>`;
+}
+async function submitSetup(username, password, password2, email){
+  username = (username||'').trim();
+  if(!username || !password){ toast('Bitte Benutzername und Passwort eingeben'); return; }
+  if(password.length<6){ toast('Passwort muss mindestens 6 Zeichen lang sein'); return; }
+  if(password !== password2){ toast('Passwörter stimmen nicht überein'); return; }
+
+  const apiResult = await callAuthApi({action:'bootstrapAdmin', username, password, email});
+  if(apiResult){
+    if(!apiResult.ok){ toast(apiResult.error||('Ersteinrichtung fehlgeschlagen (unerwartete Antwort: '+JSON.stringify(apiResult).slice(0,150)+')')); return; }
+    St.user = apiResult.user;
+    St.users[apiResult.user.username] = apiResult.user;
+    St.authToken = apiResult.token;
+    saveLoginSession(apiResult.user, apiResult.token);
+    toast('Admin-Konto angelegt');
+    go('admin');
+    return;
+  }
+  // Fallback: keine Server-Funktion konfiguriert -> lokale Ersteinrichtung
+  if(Object.keys(St.users).length>0){ toast('Ersteinrichtung bereits abgeschlossen'); go('login'); return; }
+  const adminUser = {username, email:email||'', role:'admin', locked:false,
+    createdAt:nowStamp(), lastLogin:nowStamp(), emailVerified:true};
+  await setPasswordHash(adminUser, password);
+  St.users = { [username]: adminUser };
+  const ok = await saveKeyRetry('users', St.users);
+  if(!ok){ toast('Fehler: Admin-Konto konnte nicht gespeichert werden'); return; }
+  St.user = adminUser;
+  saveLoginSession(adminUser, null);
+  toast('Admin-Konto angelegt');
+  go('admin');
+}
+
+function viewRegisterPending(){
+  const username = St.pendingVerifyUsername || '';
+  return `
+  <div class="wrap-narrow">
+    <div style="text-align:center;margin-bottom:26px;">
+      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> Fast geschafft</div>
+    </div>
+    <div class="card">
+      <h2>📧 Bitte E-Mail-Adresse bestätigen</h2>
+      <p>Wir haben dir eine Bestätigungs-Mail geschickt. Bitte klicke auf den Link in dieser
+        E-Mail, um deine Registrierung abzuschließen — erst danach kannst du dich anmelden.</p>
+      <p class="small">Keine Mail erhalten? Prüfe auch deinen Spam-Ordner. Der Link ist 24 Stunden gültig.</p>
+      <button class="btn" style="width:100%" onclick="resendVerificationEmail('${username}')">Bestätigungs-Mail erneut senden</button>
+      <p style="text-align:center;margin-top:14px;"><a href="#" onclick="go('login');return false;" style="color:var(--blue);font-weight:700;">Zurück zur Anmeldung</a></p>
+    </div>
+  </div>`;
+}
+
+function viewForgotPassword(){
+  return `
+  <div class="wrap-narrow">
+    <div style="text-align:center;margin-bottom:26px;">
+      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> Passwort vergessen</div>
+    </div>
+    <div class="card">
+      <p class="small">Gib deinen Benutzernamen oder deine E-Mail-Adresse ein. Falls ein passendes Konto
+        existiert, senden wir dir eine E-Mail mit einem Link zum Zurücksetzen des Passworts.</p>
+      <div class="field"><label>Benutzername oder E-Mail</label><input id="fp-identifier"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="submitForgotPassword(document.getElementById('fp-identifier').value)">Link anfordern</button>
+      <p style="text-align:center;margin-top:14px;"><a href="#" onclick="go('login');return false;" style="color:var(--blue);font-weight:700;">Zurück zur Anmeldung</a></p>
+    </div>
+  </div>`;
+}
+async function submitForgotPassword(identifier){
+  if(!identifier || !identifier.trim()){ toast('Bitte Benutzername oder E-Mail eingeben'); return; }
+  const r = await callAuthApi({action:'requestPasswordReset', identifier:identifier.trim()});
+  if(!r){ toast('Server nicht erreichbar'); return; }
+  if(!r.ok){ toast(r.error||'Fehler'); return; }
+  toast(r.message || 'Falls ein Konto existiert, wurde eine E-Mail verschickt.');
+  go('login');
+}
+
+function viewResetPassword(){
+  return `
+  <div class="wrap-narrow">
+    <div style="text-align:center;margin-bottom:26px;">
+      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> Neues Passwort vergeben</div>
+    </div>
+    <div class="card">
+      <div class="field"><label>Neues Passwort</label><input id="rp-pass" type="password" placeholder="Mindestens 6 Zeichen"></div>
+      <div class="field"><label>Neues Passwort bestätigen</label><input id="rp-pass2" type="password"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="submitResetPassword(document.getElementById('rp-pass').value, document.getElementById('rp-pass2').value)">Passwort setzen</button>
+    </div>
+  </div>`;
+}
+async function submitResetPassword(newPassword, newPassword2){
+  if(!newPassword || newPassword.length<6){ toast('Passwort muss mindestens 6 Zeichen lang sein'); return; }
+  if(newPassword !== newPassword2){ toast('Passwörter stimmen nicht überein'); return; }
+  const r = await callAuthApi({action:'confirmPasswordReset', resetToken:St.resetToken, newPassword});
+  if(!r){ toast('Server nicht erreichbar'); return; }
+  if(!r.ok){ toast(r.error||'Fehler'); return; }
+  St.resetToken = null;
+  // Token aus der URL entfernen, damit ein Reload nicht wieder dieselbe Seite zeigt
+  try{ history.replaceState(null,'',location.pathname); }catch(e){}
+  toast('Passwort erfolgreich geändert – bitte anmelden');
+  go('login');
+}
+
+function viewLogin(){
+  return `
+  <div class="wrap-narrow">
+    <div style="text-align:center;margin-bottom:26px;">
+      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> mSTaRT Sichtungstrainer</div>
+      <p>Anmeldung für Übungsteilnehmer</p>
+    </div>
+    <div class="card">
+      <div class="field"><label>Benutzername</label><input id="li-user" placeholder="Benutzername"></div>
+      <div class="field"><label>Passwort</label><input id="li-pass" type="password" placeholder="Passwort"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="doLogin(document.getElementById('li-user').value, document.getElementById('li-pass').value)">Anmelden</button>
+      <p style="text-align:center;margin-top:14px;">Noch kein Konto? <a href="#" onclick="go('register');return false;" style="color:var(--blue);font-weight:700;">Jetzt registrieren</a></p>
+      <p style="text-align:center;margin-top:6px;"><a href="#" onclick="go('forgotPassword');return false;" style="color:var(--muted);font-size:.85rem;">Passwort vergessen?</a></p>
+    </div>
+  </div>`;
+}
+function viewRegister(){
+  return `
+  <div class="wrap-narrow">
+    <div style="text-align:center;margin-bottom:26px;">
+      <div class="brand" style="justify-content:center;font-size:1.3rem;"><span class="dot"></span> Registrierung</div>
+    </div>
+    <div class="card">
+      <div class="field"><label>Benutzername</label><input id="re-user"></div>
+      <div class="field"><label>Passwort</label><input id="re-pass" type="password"></div>
+      <div class="field"><label>E-Mail</label><input id="re-mail" type="email"></div>
+      <p class="small">Nach der Registrierung erhältst du eine Bestätigungs-Mail — erst nach Klick auf den
+        Link darin ist dein Konto aktiv.</p>
+      <button class="btn btn-primary" style="width:100%" onclick="doRegister(document.getElementById('re-user').value,document.getElementById('re-pass').value,document.getElementById('re-mail').value)">Registrieren</button>
+      <p style="text-align:center;margin-top:14px;"><a href="#" onclick="go('login');return false;" style="color:var(--blue);font-weight:700;">Zurück zur Anmeldung</a></p>
+    </div>
+  </div>`;
+}
+
+/* ====================== RENDER: TOPBAR ====================== */
+function topbar(){
+  if(!St.user) return '';
+  return `
+  <div class="topbar">
+    <div class="brand" style="cursor:pointer" onclick="go(St.user.role==='admin'?'admin':'exercises')"><span class="dot"></span> mSTaRT Sichtungstrainer</div>
+    <div class="who">
+      <span class="badge-role">${St.user.username} · ${St.user.role}</span>
+      ${St.currentExerciseId && St.route!=='exercises' ? `<button class="btn btn-sm" onclick="go('exercises')">Übungen</button>`:''}
+      <button class="btn btn-sm btn-ghost" onclick="logout()">Abmelden</button>
+    </div>
+  </div>`;
+}
+
+/* ====================== RENDER: EXERCISES ====================== */
+// Übungsleiter bekommen — genau wie der Admin — eine Tab-Ansicht mit "Übungen" und
+// "Zertifikate" statt nur der reinen Übungsübersicht (die bleibt für Teilnehmer unverändert).
+async function goLeiterTab(tab){
+  St.leiterTab = tab;
+  render();
+  if(tab==='zertifikate'){
+    await ensureCertData();
+    render();
+  }
+}
+function viewLeiterHome(){
+  const tabs = ['uebungen','zertifikate'];
+  const tabLabels = {uebungen:'Übungen', zertifikate:'Zertifikate'};
+  const tabBar = tabs.map(t=>`<div class="tab ${St.leiterTab===t?'active':''}" onclick="goLeiterTab('${t}')">${tabLabels[t]}</div>`).join('');
+  const content = St.leiterTab==='zertifikate' ? viewCertificates() : viewExercises(true);
+  return `<div class="tabs" style="margin:18px 18px 0 18px;">${tabBar}</div>${content}`;
+}
+
+function viewExercises(embedded){
+  const canCreate = St.user.role==='uebungsleiter' || St.user.role==='admin';
+  const rows = St.exercises.map(ex=>{
+    const myRole = ex.participants[St.user.username];
+    const canManage = ex.createdBy===St.user.username || St.user.role==='admin';
+    const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+    const hospChips = (ex.krankenhaeuser||[]).map(h=>`<span class="chip">🏥 ${h.name} · ${h.km} km</span>`).join('');
+    return `<div class="card">
+      <div class="flex-between">
+        <div>
+          <h3>${ex.name} <span class="tag tag-status">${ex.status}</span> <span class="tag tag-status">${ex.modus==='liste'?'📋 mit Übersicht':'📷 QR-Scan'}</span></h3>
+          <p>${ex.scenario||''}</p>
+          ${meta?`<p class="small">${meta}</p>`:''}
+          <p class="small">Leitung: ${ex.createdBy} ${myRole?`· deine Rolle: <b style="color:var(--blue)">${myRole}</b>`:''}</p>
+          ${hospChips?`<div style="margin-top:6px;">${hospChips}</div>`:''}
+        </div>
+        <div class="row" style="flex:0 0 auto;">
+          ${ex.status==='läuft' ? `<button class="btn btn-primary btn-sm" onclick="openJoinModal('${ex.id}')">${myRole?'Weiter':'Beitreten'}</button>`:''}
+          ${canManage ? `<button class="btn btn-sm" onclick="St.currentExerciseId='${ex.id}';go('cockpit')">Cockpit</button>`:''}
+          ${canManage ? `<button class="btn btn-sm" onclick="openExerciseEditModal('${ex.id}')">Bearbeiten</button>`:''}
+        </div>
+      </div>
+    </div>`;
+  }).join('') || '<div class="empty">Noch keine Übungen vorhanden.</div>';
+
+  return `
+  <div class="wrap">
+    <div class="flex-between"><h1>Übungsübersicht</h1>
+    ${canCreate?`<button class="btn btn-primary" onclick="openCreateExerciseModal()">+ Neue Übung</button>`:''}
+    </div>
+    ${rows}
+  </div>`;
+}
+
+let modalHtml = '';
+function openCreateExerciseModal(){
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Neue Übung erstellen</h2>
+      <div class="field"><label>Name der Übung</label><input id="ex-name"></div>
+      <div class="field"><label>Szenario / Beschreibung</label><textarea id="ex-scenario" rows="3"></textarea></div>
+      <div class="row">
+        <div class="field"><label>Ort</label><input id="ex-ort" placeholder="z.B. Übungsgelände Nord"></div>
+        <div class="field"><label>Datum</label><input id="ex-datum" type="date"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Uhrzeit</label><input id="ex-uhrzeit" type="time"></div>
+        <div class="field"><label>Wetter</label><input id="ex-wetter" placeholder="z.B. 12°C, bewölkt"></div>
+      </div>
+      <div class="field">
+        <label>Sichtungs-Modus</label>
+        <div class="value-box" style="cursor:pointer;" onclick="document.getElementById('ex-modus-qr').checked=true;">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;color:var(--ink);text-transform:none;">
+            <input type="radio" name="ex-modus" id="ex-modus-qr" value="qr" checked style="width:auto;margin-top:3px;">
+            <span><b>Variante 1 – QR-Code zum Scannen:</b> Teilnehmer scannen jeden Patienten einzeln vor Ort.
+              Auf der Sichtungsseite gibt es KEINEN Zurück-Button zur Patientenübersicht.</span>
+          </label>
+        </div>
+        <div class="value-box" style="cursor:pointer;" onclick="document.getElementById('ex-modus-liste').checked=true;">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;color:var(--ink);text-transform:none;">
+            <input type="radio" name="ex-modus" id="ex-modus-liste" value="liste" style="width:auto;margin-top:3px;">
+            <span><b>Variante 2 – Mit Patientenübersicht (ohne QR-Codes):</b> Teilnehmer wählen Patienten aus einer
+              Liste. Auf der Sichtungsseite gibt es einen Zurück-Button zur Patientenübersicht.</span>
+          </label>
+        </div>
+      </div>
+      <div class="field">
+        <label>Anzahl Patienten für diese Übung</label>
+        <input id="ex-patientcount" type="number" min="1" max="100" value="20">
+        <p class="small" style="margin-top:4px;">
+          Variante 2 (Übersicht): Es werden genau so viele zum Szenario passende Patienten aus der
+          Datenbank für diese Übung ausgewählt. Variante 1 (QR): dient nur als Planungsgröße — welche
+          Patienten tatsächlich vorkommen, entscheidet sich durch die tatsächlich gescannten QR-Codes.
+        </p>
+      </div>
+      <p class="small">Krankenhäuser können nach dem Erstellen über "Bearbeiten" hinzugefügt werden.</p>
+      <button class="btn btn-primary" style="width:100%" onclick="createExercise(
+        document.getElementById('ex-name').value,
+        document.getElementById('ex-scenario').value,
+        document.getElementById('ex-ort').value,
+        document.getElementById('ex-datum').value,
+        document.getElementById('ex-uhrzeit').value,
+        document.getElementById('ex-wetter').value,
+        document.querySelector('input[name=ex-modus]:checked').value,
+        document.getElementById('ex-patientcount').value);closeModal();">Erstellen</button>
+    </div>
+  </div>`;
+  render();
+}
+
+function openExerciseEditModal(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const hospitals = (ex.krankenhaeuser||[]).map(h=>
+    `<span class="chip">🏥 ${h.name} · ${h.km} km <button onclick="removeHospital('${exId}','${h.id}')" title="Entfernen">✕</button></span>`
+  ).join('') || '<p class="small">Noch keine Krankenhäuser hinterlegt.</p>';
+
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="max-width:520px;">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Übung bearbeiten</h2>
+      <div class="field"><label>Name der Übung</label><input id="exe__name" value="${ex.name||''}"></div>
+      <div class="field"><label>Szenario / Beschreibung</label><textarea id="exe__scenario" rows="3">${ex.scenario||''}</textarea></div>
+      <div class="row">
+        <div class="field"><label>Ort</label><input id="exe__ort" value="${ex.ort||''}"></div>
+        <div class="field"><label>Datum</label><input id="exe__datum" type="date" value="${ex.datum||''}"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Uhrzeit</label><input id="exe__uhrzeit" type="time" value="${ex.uhrzeit||''}"></div>
+        <div class="field"><label>Wetter</label><input id="exe__wetter" value="${ex.wetter||''}"></div>
+      </div>
+      <div class="field">
+        <label>Sichtungs-Modus</label>
+        <div class="value-box" style="cursor:pointer;" onclick="document.getElementById('exe-modus-qr').checked=true;">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;color:var(--ink);text-transform:none;">
+            <input type="radio" name="exe__modus" id="exe-modus-qr" value="qr" ${(ex.modus||'qr')==='qr'?'checked':''} style="width:auto;margin-top:3px;">
+            <span><b>Variante 1 – QR-Code zum Scannen:</b> kein Zurück-Button auf der Sichtungsseite.</span>
+          </label>
+        </div>
+        <div class="value-box" style="cursor:pointer;" onclick="document.getElementById('exe-modus-liste').checked=true;">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;color:var(--ink);text-transform:none;">
+            <input type="radio" name="exe__modus" id="exe-modus-liste" value="liste" ${ex.modus==='liste'?'checked':''} style="width:auto;margin-top:3px;">
+            <span><b>Variante 2 – Mit Patientenübersicht:</b> Zurück-Button zur Patientenübersicht vorhanden.</span>
+          </label>
+        </div>
+      </div>
+      <div class="field">
+        <label>Anzahl Patienten</label>
+        <input id="exe__patientcount" type="number" min="1" max="100" value="${ex.patientCount||20}">
+        <p class="small" style="margin-top:4px;">
+          Bei Variante 2 (Übersicht) wählt "Neu auswählen" genau so viele zum (ggf. geänderten) Szenario
+          passende Patienten neu aus der Datenbank aus — die bisherige Auswahl für diese Übung wird ersetzt.
+          Bei Variante 1 (QR) ist die Zahl nur ein Planungswert.
+        </p>
+        ${ex.modus==='liste' ? `<button class="btn btn-sm" onclick="regenerateExercisePatients('${exId}')">🎲 Patienten neu auswählen</button>` : ''}
+      </div>
+      <button class="btn btn-primary" style="width:100%" onclick="saveExerciseDetails('${exId}')">Änderungen speichern</button>
+
+      <div class="section-title">Nächstgelegene Krankenhäuser</div>
+      <div>${hospitals}</div>
+      <div class="row" style="margin-top:8px;">
+        <input id="hosp-name" placeholder="Name des Krankenhauses" style="flex:2;">
+        <input id="hosp-km" type="number" placeholder="km" style="flex:1;min-width:70px;">
+        <button class="btn btn-sm" onclick="addHospital('${exId}', document.getElementById('hosp-name').value, document.getElementById('hosp-km').value)">+ Hinzufügen</button>
+      </div>
+
+      <div class="divider"></div>
+      <button class="btn btn-danger" style="width:100%" onclick="if(confirm('Übung wirklich unwiderruflich löschen?')){deleteExercise('${exId}');closeModal();}">Übung löschen</button>
+    </div>
+  </div>`;
+  render();
+}
+
+function openJoinModal(exId){
+  const ex = St.exercises.find(e=>e.id===exId);
+  const opts = ex.roles.map(r=>`<option value="${r}">${r}</option>`).join('');
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Rolle wählen</h2>
+      <p>Übung: ${ex.name}</p>
+      <div class="field"><label>Rolle</label><select id="jr-role">${opts}</select></div>
+      <button class="btn btn-primary" style="width:100%" onclick="joinExercise('${exId}', document.getElementById('jr-role').value);closeModal();">Übung betreten</button>
+    </div>
+  </div>`;
+  render();
+}
+function closeModal(){ modalHtml=''; render(); }
+
+/* ====================== RENDER: PATIENTS OVERVIEW ====================== */
+function viewPatients(){
+  const exId = St.currentExerciseId;
+  const ex = St.exercises.find(e=>e.id===exId);
+  const list = St.sichtungen[exId] || [];
+  const relevantPatients = (ex && ex.patientIds && ex.patientIds.length)
+    ? St.patients.filter(p=>ex.patientIds.includes(p.id))
+    : St.patients;
+  const tiles = relevantPatients.map(p=>{
+    const done = list.some(r=>r.patientId===p.id && r.username===St.user.username && r.kategorie);
+    return `<div class="id-tile ${done?'done':''}" onclick="openPatient(${p.id})">${p.id}</div>`;
+  }).join('');
+  return `
+  <div class="wrap">
+    <h1>Patientenübersicht</h1>
+    <p>Rolle: <span class="badge-role">${St.currentRole}</span> · ${relevantPatients.length} Patienten in dieser Übung</p>
+    <div class="grid" style="margin-top:16px;">${tiles || '<div class="empty">Keine Patienten in der Datenbank</div>'}</div>
+  </div>`;
+}
+
+// Landing-Seite für Teilnehmer im QR-Scan-Modus (Variante 1): statt einer Patientenübersicht
+// bekommen sie eine aufbereitete "Einsatzdepesche" mit allen für sie relevanten Infos zur
+// Übung angezeigt. Die eigentlichen Patienten erreichen sie ausschließlich über die QR-Codes
+// vor Ort — diese Seite listet daher bewusst keine Patienten-IDs auf.
+function viewBriefing(){
+  const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
+  if(!ex) return `<div class="wrap"><div class="empty">Keine Übung ausgewählt.</div>
+    <button class="btn" onclick="go('exercises')">Zu den Übungen</button></div>`;
+  const hospList = (ex.krankenhaeuser||[]).map(h=>`<span class="chip">🏥 ${h.name} · ${h.km} km</span>`).join('')
+    || '<p class="small">Keine Krankenhäuser hinterlegt.</p>';
+  return `
+  <div class="wrap">
+    <div class="card" style="border-left:5px solid var(--red);">
+      <div class="small" style="letter-spacing:.12em;text-transform:uppercase;color:var(--red);font-weight:800;">⚠ Einsatzdepesche</div>
+      <h1 style="margin-top:4px;">${ex.name}</h1>
+      <div class="divider"></div>
+      <div class="value-box"><div class="lbl">Meldebild / Lage</div><div class="val">${ex.scenario||'—'}</div></div>
+      <div class="row">
+        <div class="value-box"><div class="lbl">Einsatzort</div><div class="val">${ex.ort||'—'}</div></div>
+        <div class="value-box"><div class="lbl">Datum</div><div class="val">${ex.datum||'—'}</div></div>
+      </div>
+      <div class="row">
+        <div class="value-box"><div class="lbl">Alarmzeit</div><div class="val">${ex.uhrzeit||'—'}</div></div>
+        <div class="value-box"><div class="lbl">Wetterlage</div><div class="val">${ex.wetter||'—'}</div></div>
+      </div>
+      <div class="value-box"><div class="lbl">Deine Funktion / Rolle</div><div class="val"><span class="badge-role">${St.currentRole}</span></div></div>
+      <div class="section-title">Nächstgelegene Krankenhäuser</div>
+      <div class="row" style="flex-wrap:wrap;gap:6px;">${hospList}</div>
+      <div class="divider"></div>
+      <p class="small">📷 Begib dich ins Einsatzgebiet und scanne die QR-Codes an den Patienten vor Ort, um mit der Sichtung zu beginnen.</p>
+    </div>
+  </div>`;
+}
+
+/* ====================== BODY DIAGRAM ====================== */
+function bodyShapeAttrs(injured){
+  return injured
+    ? `fill="var(--red)" fill-opacity="0.55" stroke="var(--red)" stroke-width="3"`
+    : `fill="var(--panel2)" stroke="var(--line)" stroke-width="2"`;
+}
+function bodyRegionSvg(view, p){
+  const k = p.koerper;
+  const thoraxKey = view==='front' ? 'thoraxVorne' : 'thoraxHinten';
+  const thoraxLabel = view==='front' ? 'Thorax vorne' : 'Thorax hinten';
+  const ring = (key)=> (St.selectedBodyPart && St.selectedBodyPart.key===key) ? `stroke="var(--navy)" stroke-width="4"` : '';
+  // Bei der Vorderansicht liegt der PATIENTENLINKE Arm/Bein auf der Bild-RECHTEN Seite (Betrachter schaut dem
+  // Patienten ins Gesicht). Bei der Rückansicht ist es umgekehrt (Betrachter schaut auf den Rücken) -> gespiegelt.
+  const rechtsX = view==='front' ? 18 : 154;
+  const linksX  = view==='front' ? 154 : 18;
+  const rechtsBeinX = view==='front' ? 56 : 116;
+  const linksBeinX  = view==='front' ? 116 : 56;
+  const shapes = `
+    <circle cx="100" cy="40" r="28" ${bodyShapeAttrs(!!k.kopf)} ${ring('kopf')}
+      onclick="selectBodyPart('kopf','Kopf')" style="cursor:pointer"><title>Kopf</title></circle>
+    <rect x="68" y="72" width="64" height="100" rx="12" ${bodyShapeAttrs(!!k[thoraxKey])} ${ring(thoraxKey)}
+      onclick="selectBodyPart('${thoraxKey}','${thoraxLabel}')" style="cursor:pointer"><title>${thoraxLabel}</title></rect>
+    <rect x="${rechtsX}" y="80" width="28" height="92" rx="8" ${bodyShapeAttrs(!!k.armRechts)} ${ring('armRechts')}
+      onclick="selectBodyPart('armRechts','Arm rechts')" style="cursor:pointer"><title>Arm rechts</title></rect>
+    <rect x="${linksX}" y="80" width="28" height="92" rx="8" ${bodyShapeAttrs(!!k.armLinks)} ${ring('armLinks')}
+      onclick="selectBodyPart('armLinks','Arm links')" style="cursor:pointer"><title>Arm links</title></rect>
+    <rect x="${rechtsBeinX}" y="182" width="28" height="112" rx="8" ${bodyShapeAttrs(!!k.beinRechts)} ${ring('beinRechts')}
+      onclick="selectBodyPart('beinRechts','Bein rechts')" style="cursor:pointer"><title>Bein rechts</title></rect>
+    <rect x="${linksBeinX}" y="182" width="28" height="112" rx="8" ${bodyShapeAttrs(!!k.beinLinks)} ${ring('beinLinks')}
+      onclick="selectBodyPart('beinLinks','Bein links')" style="cursor:pointer"><title>Bein links</title></rect>
+  `;
+  return `<div style="text-align:center;">
+    <svg viewBox="0 0 200 310" width="150" height="232">${shapes}</svg>
+    <div class="small">${view==='front'?'Vorderseite':'Rückseite'}</div>
+  </div>`;
+}
+function bodySvgSection(p){
+  const sel = St.selectedBodyPart;
+  const detail = sel
+    ? `<div class="value-box"><div class="lbl">${sel.label}</div><div class="val">${p.koerper[sel.key] || 'Kein Befund'}</div></div>`
+    : `<p class="small">Klicke auf eine Körperregion, um den Befund zu sehen. Rot markierte Bereiche weisen auf einen Befund hin.</p>`;
+  return `<div class="figure-wrap">
+    ${bodyRegionSvg('front',p)}
+    ${bodyRegionSvg('back',p)}
+    <div class="body-list" style="flex:1;min-width:200px;">${detail}</div>
+  </div>`;
+}
+
+/* ====================== RENDER: SICHTUNG ====================== */
+function fieldBlock(label, key, seconds, content){
+  const revealed = St.reveal[key];
+  const isTiming = St.timer.active && St.timer.field===key;
+  let inner;
+  if(revealed){ inner = `<div class="val">${content}</div>`; }
+  else if(isTiming){ inner = `<div class="pending">Wird ermittelt… ${St.timer.remaining}s</div>`; }
+  else { inner = `<button class="timer-btn" onclick="startTimer('${key}',${seconds})">▶ Start (${seconds}s)</button>`; }
+  return `<div class="value-box"><div class="lbl">${label}</div>${inner}</div>`;
+}
+
+function viewSichtung(){
+  const p = St.patients.find(x=>x.id===St.currentPatientId);
+  if(!p){
+    const exFallback = St.exercises.find(e=>e.id===St.currentExerciseId);
+    const fallbackRoute = (exFallback && exFallback.modus==='liste') ? 'patients' : 'depesche';
+    return `<div class="wrap"><p>Patient nicht gefunden.</p><button class="btn" onclick="go('${fallbackRoute}')">Zurück</button></div>`;
+  }
+  const myCat = myTriageFor(p.id);
+
+  const xabcdeLabels = {X:'X – Kritische Blutung', A:'A – Atemweg', B:'B – Atmung', C:'C – Kreislauf', D:'D – Bewusstsein/Defizit', E:'E – Exposition/Umgebung'};
+  const xabcde = Object.keys(xabcdeLabels).map(k=>fieldBlock(xabcdeLabels[k], 'x_'+k, 10, p.xabcde[k])).join('');
+
+  const samplerLabels = {S:'S – Symptome', A:'A – Allergien', M:'M – Medikamente', P:'P – Patientengeschichte',
+    L:'L – Letzte Mahlzeit', E:'E – Ereignis', R:'R – Risikofaktoren'};
+  const sampler = Object.keys(samplerLabels).map(k=>fieldBlock(samplerLabels[k], 's_'+k, 10, p.sampler[k])).join('');
+
+  const vitalLabels = {puls:'Puls',blutdruck:'Blutdruck',rekap:'ReKap-Zeit',af:'Atemfrequenz',spo2:'SpO2',bz:'Blutzucker',
+    temp:'Temperatur',etco2:'etCO2',hb:'Hb',co:'CO',spmet:'SpMet'};
+  const vitals = `<div class="vitals-grid">${Object.keys(vitalLabels).map(k=>fieldBlock(vitalLabels[k],'v_'+k,10,p.vitals[k])).join('')}</div>`;
+
+  const scoreLabels = {gcs:'GCS',befast:'BE-FAST',news2:'NEWS2',nexus:'NEXUS-Kriterien',qsofa:'qSOFA',
+    spesi:'sPESI',wells:'Wells-Score',apgar:'APGAR'};
+  const scores = `<div class="vitals-grid">${Object.keys(scoreLabels).map(k=>fieldBlock(scoreLabels[k],'sc_'+k,10,p.scores[k])).join('')}</div>`;
+
+  const catButtons = CATS.map(c=>`<div class="cat-btn ${c} ${myCat===c?'selected':''}" onclick="setTriage('${c}')">${CAT_LABEL[c]}</div>`).join('');
+
+  const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
+  const hospList = (ex && ex.krankenhaeuser) || [];
+  const myHosp = myHospitalFor(p.id);
+  const hospChips = hospList.length
+    ? hospList.map(h=>`<div class="chip" style="cursor:pointer;${myHosp===h.id?'border-color:var(--navy);background:var(--yellow-dim);font-weight:700;':''}" onclick="assignHospital('${h.id}')">🏥 ${h.name} · ${h.km} km ${myHosp===h.id?'✓':''}</div>`).join('')
+    : '<p class="small">Für diese Übung sind keine Krankenhäuser hinterlegt.</p>';
+  const assignedHospName = myHosp ? (hospList.find(h=>h.id===myHosp)||{}).name : null;
+  const showBackButton = !ex || ex.modus === 'liste'; // Variante 2 (Patientenübersicht) hat den Button, Variante 1 (QR) nicht
+
+  return `
+  <div class="wrap">
+    ${showBackButton ? `<button class="btn" onclick="stopTimer();clearPatientUrlParam();go('patients')">← Zurück zur Patientenübersicht</button>` : ''}
+    <div class="card" style="margin-top:14px;">
+      <div class="flex-between">
+        <div>
+          ${fieldBlock('Name / Alter / Geschlecht', 'basis', 5, `${p.vorname} ${p.nachname}, ${p.alter} Jahre, ${p.geschlecht}`)}
+        </div>
+        <span class="id-chip">#${p.id}</span>
+      </div>
+      ${fieldBlock('Ersteindruck', 'erst', 5, p.ersteindruck)}
+      ${fieldBlock('Gehfähigkeit / Mobilität', 'geh', 5, p.gehfaehigkeit)}
+      ${fieldBlock('Offensichtliche Beobachtungen / äußere Befunde', 'befunde', 5, p.befunde)}
+
+      <div class="section-title">Verletzungsmuster / Körperstatus</div>
+      ${fieldBlock('Körperstatus (Vorder- und Rückseite)', 'koerper_all', 5, bodySvgSection(p))}
+
+      <div class="section-title">X-ABCDE-Schema</div>
+      ${xabcde}
+
+      <div class="section-title">SAMPLER-Schema</div>
+      ${sampler}
+
+      <div class="section-title">Messwerte</div>
+      ${vitals}
+
+      <div class="section-title">Klinische Scores & Assessment</div>
+      ${scores}
+
+      <div class="section-title">Sichtungsergebnis</div>
+      <div class="cat-row">${catButtons}</div>
+      ${myCat?`<p style="margin-top:8px;">Aktuell gesichtet mit: <span class="tag tag-${myCat}">${CAT_LABEL[myCat]}</span></p>`:''}
+
+      <div class="section-title">Krankenhaus-Zuordnung (optional)</div>
+      <p class="small">Du kannst diesem Patienten optional ein Zielkrankenhaus zuordnen – das ist kein Muss. Erneutes Klicken hebt die Zuordnung wieder auf.</p>
+      <div class="row" style="flex-wrap:wrap;gap:6px;">${hospChips}</div>
+      ${assignedHospName?`<p style="margin-top:8px;">Zugeordnet: <b style="color:var(--blue)">${assignedHospName}</b></p>`:''}
+    </div>
+  </div>`;
+}
+
+/* ====================== RENDER: COCKPIT ====================== */
+// Briefing-Seite für den ÜBUNGSLEITER/ADMIN (nicht zu verwechseln mit der "Einsatzdepesche"
+// der Teilnehmer, viewBriefing()). Hier trägt der Übungsleiter vor Übungsbeginn alle Angaben
+// ein, mit denen er die Teilnehmer vor Ort briefen kann, und startet von hier aus die Übung.
+function viewTrainerBriefing(){
+  const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
+  if(!ex) return `<div class="wrap"><div class="empty">Keine Übung ausgewählt.</div>
+    <button class="btn" onclick="go('exercises')">Zu den Übungen</button></div>`;
+  const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+  const hospChips = (ex.krankenhaeuser||[]).map(h=>`<span class="chip">🏥 ${h.name} · ${h.km} km</span>`).join('')
+    || '<p class="small">Keine Krankenhäuser hinterlegt.</p>';
+  const sicherOptions = ['sicher','nicht sicher','unklar'].map(v=>
+    `<option value="${v}" ${ (ex.einsatzstelleSicher||'unklar')===v ? 'selected':'' }>${v}</option>`).join('');
+
+  return `
+  <div class="wrap">
+    <button class="btn" onclick="go('cockpit')">← Zurück zum Cockpit</button>
+    <div class="card" style="margin-top:14px;border-left:5px solid var(--navy);">
+      <div class="small" style="letter-spacing:.12em;text-transform:uppercase;color:var(--navy);font-weight:800;">📋 Briefing für Übungsleiter</div>
+      <h1 style="margin-top:4px;">${ex.name}</h1>
+      ${meta?`<p class="small">${meta}</p>`:''}
+
+      <div class="section-title" style="margin-top:18px;">Allgemeine Einsatzdaten</div>
+      <div class="row">
+        <div class="value-box"><div class="lbl">Ort</div><div class="val">${ex.ort||'—'}</div></div>
+        <div class="value-box"><div class="lbl">Datum</div><div class="val">${ex.datum||'—'}</div></div>
+      </div>
+      <div class="row">
+        <div class="value-box"><div class="lbl">Uhrzeit</div><div class="val">${ex.uhrzeit||'—'}</div></div>
+        <div class="value-box"><div class="lbl">Wetter</div><div class="val">${ex.wetter||'—'}</div></div>
+      </div>
+      <div class="value-box"><div class="lbl">Szenario / Lage</div><div class="val">${ex.scenario||'—'}</div></div>
+      <p class="small">Ort/Datum/Uhrzeit/Wetter/Szenario werden über "⚙ Übung bearbeiten" im Cockpit gepflegt.</p>
+
+      <div class="section-title">Einsatzstichwort</div>
+      <div class="field"><input id="bf__stichwort" placeholder="z.B. MANV 10 - Verkehrsunfall" value="${ex.einsatzstichwort||''}"></div>
+
+      <div class="section-title">Kräfte</div>
+      <div class="field"><label>Alarmierte Kräfte</label>
+        <textarea id="bf__alarmiert" rows="2" placeholder="z.B. 3x RTW, 2x NEF, LNA, OrgL, GW San">${ex.alarmierteKraefte||''}</textarea></div>
+      <div class="field"><label>Bereits eingetroffene Kräfte</label>
+        <textarea id="bf__eingetroffen" rows="2" placeholder="z.B. 1x RTW, 1x NEF vor Ort">${ex.eingetroffeneKraefte||''}</textarea></div>
+      <div class="field"><label>Rückmeldungen</label>
+        <textarea id="bf__rueckmeldungen" rows="2" placeholder="z.B. Rückmeldung Erkunder: ca. 12 Verletzte">${ex.rueckmeldungen||''}</textarea></div>
+
+      <div class="section-title">Lage vor Ort (stichpunktartig)</div>
+      <div class="field"><label>Aufstellfläche</label>
+        <input id="bf__aufstellflaeche" placeholder="z.B. Parkplatz Nord, Zufahrt über..." value="${ex.aufstellflaeche||''}"></div>
+      <div class="field"><label>Anfahrtswege</label>
+        <input id="bf__anfahrt" placeholder="z.B. Anfahrt nur über Hauptstraße von Norden" value="${ex.anfahrtswege||''}"></div>
+      <div class="field"><label>Einsatzstelle sicher / nicht sicher</label>
+        <select id="bf__sicher">${sicherOptions}</select></div>
+      <div class="field"><label>Einsatzgrenzen / gefährliche & nicht betretbare Bereiche</label>
+        <textarea id="bf__grenzen" rows="2" placeholder="z.B. Einsturzgefährdeter Gebäudeteil im Osten nicht betreten">${ex.einsatzgrenzen||''}</textarea></div>
+
+      <button class="btn" style="width:100%" onclick="saveBriefingDetails('${ex.id}')">Briefing-Angaben speichern</button>
+
+      <div class="section-title">Nächstgelegene Krankenhäuser</div>
+      <div class="row" style="flex-wrap:wrap;gap:6px;">${hospChips}</div>
+
+      <div class="divider"></div>
+      <p class="small">Mit "Übung starten" wird die Übung auf "läuft" gesetzt, ein Startzeitpunkt für das
+        spätere Debriefing hinterlegt, und du gelangst automatisch ins Übungsleiter-Cockpit.</p>
+      <button class="btn btn-primary" style="width:100%" onclick="startExerciseFromBriefing('${ex.id}')">▶ Übung starten</button>
+    </div>
+  </div>`;
+}
+
+function formatDuration(totalSeconds){
+  if(totalSeconds==null) return 'nicht verfügbar';
+  const h = Math.floor(totalSeconds/3600);
+  const m = Math.floor((totalSeconds%3600)/60);
+  const s = Math.round(totalSeconds%60);
+  if(h>0) return `${h} Std. ${m} Min. ${s} Sek.`;
+  if(m>0) return `${m} Min. ${s} Sek.`;
+  return `${s} Sek.`;
+}
+
+// Berechnet alle Fazit-Kennzahlen für das Debriefing einer Übung: Gesamtzeit, Durchschnitts-
+// Sichtungszeit, Anzahl richtig/falsch gesichteter Patienten.
+function computeDebriefingStats(exId){
+  const ex = St.exercises.find(e=>e.id===exId);
+  const log = (ex && ex.log) || [];
+  const startEntry = log.find(l=>l.event==='Übung gestartet (Briefing abgeschlossen)' || l.event==='status:läuft');
+  const endCandidates = log.filter(l=>l.event==='status:beendet');
+  const endEntry = endCandidates.length ? endCandidates[endCandidates.length-1] : null;
+  let gesamtzeitSek = null;
+  if(startEntry && endEntry && startEntry.timeMs && endEntry.timeMs && endEntry.timeMs>=startEntry.timeMs){
+    gesamtzeitSek = Math.round((endEntry.timeMs - startEntry.timeMs)/1000);
+  }
+
+  const list = (St.sichtungen[exId]||[]).filter(r=>r.kategorie);
+  let correct=0, wrong=0;
+  list.forEach(r=>{
+    const p = St.patients.find(pp=>pp.id===r.patientId);
+    if(p){ if(p.kategorieReal===r.kategorie) correct++; else wrong++; }
+  });
+  const durations = list.map(r=>r.dauerSekunden).filter(d=>d!=null && d>=0);
+  const avgDurationSek = durations.length ? Math.round(durations.reduce((a,b)=>a+b,0)/durations.length) : null;
+
+  return {
+    startEntry, endEntry, gesamtzeitSek,
+    totalGesichtet: list.length, correct, wrong, avgDurationSek,
+    durationsCount: durations.length
+  };
+}
+
+// Führt Übungs-Log (Statuswechsel/Buttons im Cockpit) und Sichtungsergebnisse zu EINER
+// chronologischen Liste zusammen, wie für die Debriefing-Seite gefordert.
+function buildDebriefingTimeline(exId){
+  const ex = St.exercises.find(e=>e.id===exId);
+  const entries = [];
+  (ex && ex.log || []).forEach(l=>{
+    let icon = '📢'; // manueller Schnelleintrag/freie Eingabe (Standard)
+    if(l.event.startsWith('status:')) icon = '⚙';
+    else if(l.event.includes('Übung gestartet')) icon = '▶';
+    entries.push({ time:l.time, timeMs:l.timeMs||0, text:`${icon} ${l.event}`, kind:'log' });
+  });
+  (St.sichtungen[exId]||[]).forEach(r=>{
+    if(!r.kategorie) return;
+    const p = St.patients.find(pp=>pp.id===r.patientId);
+    const match = p ? (p.kategorieReal===r.kategorie ? '✓ korrekt' : '✕ falsch') : '';
+    entries.push({ time:r.timestamp, timeMs:r.timestampMs||0,
+      text:`🩺 ${r.username} (${r.role}) sichtete Patient #${r.patientId} mit ${CAT_LABEL[r.kategorie]} ${match?'– '+match:''}`,
+      kind:'sichtung' });
+  });
+  entries.sort((a,b)=> (a.timeMs||0)-(b.timeMs||0) || (a.time||'').localeCompare(b.time||''));
+  return entries;
+}
+
+function viewDebriefing(){
+  const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
+  if(!ex) return `<div class="wrap"><div class="empty">Keine Übung ausgewählt.</div>
+    <button class="btn" onclick="go('exercises')">Zu den Übungen</button></div>`;
+  const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+  const hospChips = (ex.krankenhaeuser||[]).map(h=>`<span class="chip">🏥 ${h.name} · ${h.km} km</span>`).join('')
+    || '<span class="small">Keine hinterlegt</span>';
+  const stats = computeDebriefingStats(ex.id);
+  const timeline = buildDebriefingTimeline(ex.id);
+  const timelineRows = timeline.map(t=>`<tr><td style="white-space:nowrap;">${t.time}</td><td>${t.text}</td></tr>`).join('')
+    || `<tr><td colspan="2" class="empty">Noch keine Ereignisse erfasst</td></tr>`;
+  const briefingFields = [
+    ['Einsatzstichwort', ex.einsatzstichwort], ['Alarmierte Kräfte', ex.alarmierteKraefte],
+    ['Eingetroffene Kräfte', ex.eingetroffeneKraefte], ['Rückmeldungen', ex.rueckmeldungen],
+    ['Aufstellfläche', ex.aufstellflaeche], ['Anfahrtswege', ex.anfahrtswege],
+    ['Einsatzstelle', ex.einsatzstelleSicher], ['Einsatzgrenzen / Gefahrenbereiche', ex.einsatzgrenzen]
+  ].filter(([,v])=>v);
+
+  return `
+  <div class="wrap">
+    <button class="btn" onclick="go('cockpit')">← Zurück zum Cockpit</button>
+    <div class="card" style="margin-top:14px;border-left:5px solid var(--navy);">
+      <div class="small" style="letter-spacing:.12em;text-transform:uppercase;color:var(--navy);font-weight:800;">🧾 Debriefing</div>
+      <h1 style="margin-top:4px;">${ex.name} <span class="tag tag-status">${ex.status}</span></h1>
+      ${meta?`<p class="small">${meta}</p>`:''}
+
+      <div class="section-title" style="margin-top:18px;">Einsatzdaten</div>
+      <div class="value-box"><div class="lbl">Szenario / Lage</div><div class="val">${ex.scenario||'—'}</div></div>
+      ${briefingFields.map(([k,v])=>`<div class="value-box"><div class="lbl">${k}</div><div class="val">${v}</div></div>`).join('')}
+      <div class="section-title">Nächstgelegene Krankenhäuser</div>
+      <div class="row" style="flex-wrap:wrap;gap:6px;">${hospChips}</div>
+
+      <div class="section-title">Chronologischer Verlauf</div>
+      <table><thead><tr><th>Zeit</th><th>Ereignis</th></tr></thead><tbody>${timelineRows}</tbody></table>
+
+      <div class="section-title">Fazit der Übung</div>
+      <div class="vitals-grid">
+        <div class="value-box"><div class="lbl">Gesamtzeit der Übung</div><div class="val">${formatDuration(stats.gesamtzeitSek)}</div></div>
+        <div class="value-box"><div class="lbl">Ø Sichtungszeit pro Patient</div><div class="val">${formatDuration(stats.avgDurationSek)}${stats.durationsCount?` (aus ${stats.durationsCount} Messwerten)`:''}</div></div>
+        <div class="value-box"><div class="lbl">Gesichtete Patienten gesamt</div><div class="val">${stats.totalGesichtet}</div></div>
+        <div class="value-box"><div class="lbl">Richtig gesichtet</div><div class="val" style="color:var(--green);font-weight:700;">${stats.correct}</div></div>
+        <div class="value-box"><div class="lbl">Falsch gesichtet</div><div class="val" style="color:var(--red);font-weight:700;">${stats.wrong}</div></div>
+      </div>
+      ${(!stats.startEntry || !stats.endEntry) ? `<p class="small">Hinweis: Für die Gesamtzeit müssen sowohl ein Start- als auch ein Ende-Zeitpunkt der Übung erfasst sein (Übung über Briefing/Cockpit starten und über "⏹ Beenden" abschließen).</p>` : ''}
+
+      <div class="divider"></div>
+      <div class="row">
+        <button class="btn btn-primary" onclick="exportDebriefingPdf('${ex.id}')">📄 Als PDF erzeugen / drucken</button>
+      </div>
+      <p class="small">Der PDF-Export öffnet den Druckdialog deines Browsers — dort kannst du direkt drucken oder "Als PDF speichern" wählen.</p>
+
+      <div class="section-title">Protokoll per E-Mail versenden</div>
+      <p class="small">Das System erzeugt ein PDF des kompletten Debriefing-Berichts und verschickt es direkt als Anhang an die angegebenen Adressen.</p>
+      <div class="field"><label>E-Mail-Adresse(n)</label>
+        <textarea id="db-emails" rows="2" placeholder="z.B. leiter@feuerwehr.de, org@feuerwehr.de"></textarea></div>
+      <p class="small">Mehrere Adressen durch Komma, Semikolon oder Zeilenumbruch trennen.</p>
+      <button class="btn" ${St.debriefingMailBusy?'disabled':''} onclick="emailDebriefing('${ex.id}')">${St.debriefingMailBusy?'Wird gesendet…':'✉️ Protokoll per E-Mail senden'}</button>
+    </div>
+  </div>`;
+}
+
+function exportDebriefingPdf(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+  const stats = computeDebriefingStats(exId);
+  const timeline = buildDebriefingTimeline(exId);
+  const timelineRows = timeline.map(t=>`<tr><td>${t.time}</td><td>${t.text.replace(/[⚙🩺✓✕📢▶]/g,'').trim()}</td></tr>`).join('')
+    || '<tr><td colspan="2">Keine Ereignisse erfasst</td></tr>';
+  const briefingFields = [
+    ['Einsatzstichwort', ex.einsatzstichwort], ['Alarmierte Kräfte', ex.alarmierteKraefte],
+    ['Eingetroffene Kräfte', ex.eingetroffeneKraefte], ['Rückmeldungen', ex.rueckmeldungen],
+    ['Aufstellfläche', ex.aufstellflaeche], ['Anfahrtswege', ex.anfahrtswege],
+    ['Einsatzstelle', ex.einsatzstelleSicher], ['Einsatzgrenzen / Gefahrenbereiche', ex.einsatzgrenzen]
+  ].filter(([,v])=>v).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  const html = `<html><head><meta charset="utf-8"><title>${ex.name} – Debriefing</title>
+  <style>body{font-family:sans-serif;padding:24px;} h1{margin-bottom:2px;} h2{margin-top:26px;} table{width:100%;border-collapse:collapse;margin-top:12px;}
+  th,td{border:1px solid #999;padding:6px 8px;font-size:13px;text-align:left;} th{background:#eee;}
+  .fazit td{font-weight:bold;}</style></head>
+  <body>
+  <h1>Debriefing: ${ex.name}</h1>
+  <p>Szenario: ${ex.scenario||'-'}<br>${meta?meta+'<br>':''}Status: ${ex.status}<br>Exportiert: ${nowStamp()}</p>
+  ${briefingFields?`<h2>Einsatzdaten</h2><table><tbody>${briefingFields}</tbody></table>`:''}
+  <h2>Chronologischer Verlauf</h2>
+  <table><thead><tr><th>Zeit</th><th>Ereignis</th></tr></thead><tbody>${timelineRows}</tbody></table>
+  <h2>Fazit</h2>
+  <table class="fazit"><tbody>
+    <tr><td>Gesamtzeit der Übung</td><td>${formatDuration(stats.gesamtzeitSek)}</td></tr>
+    <tr><td>Ø Sichtungszeit pro Patient</td><td>${formatDuration(stats.avgDurationSek)}</td></tr>
+    <tr><td>Gesichtete Patienten gesamt</td><td>${stats.totalGesichtet}</td></tr>
+    <tr><td>Richtig gesichtet</td><td>${stats.correct}</td></tr>
+    <tr><td>Falsch gesichtet</td><td>${stats.wrong}</td></tr>
+  </tbody></table>
+  </body></html>`;
+  const w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  w.print();
+}
+
+async function emailDebriefing(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  const emailsRaw = (document.getElementById('db-emails')||{}).value || '';
+  if(!emailsRaw.trim()){ toast('Bitte mindestens eine E-Mail-Adresse eingeben'); return; }
+
+  const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+  const stats = computeDebriefingStats(exId);
+  const timeline = buildDebriefingTimeline(exId).map(t=>({
+    time: t.time, text: t.text.replace(/[⚙🩺✓✕📢▶]/g,'').trim()
+  }));
+  const briefingFields = [
+    ['Einsatzstichwort', ex.einsatzstichwort], ['Alarmierte Kräfte', ex.alarmierteKraefte],
+    ['Eingetroffene Kräfte', ex.eingetroffeneKraefte], ['Rückmeldungen', ex.rueckmeldungen],
+    ['Aufstellfläche', ex.aufstellflaeche], ['Anfahrtswege', ex.anfahrtswege],
+    ['Einsatzstelle', ex.einsatzstelleSicher], ['Einsatzgrenzen / Gefahrenbereiche', ex.einsatzgrenzen]
+  ].filter(([,v])=>v);
+
+  St.debriefingMailBusy = true; render();
+  const r = await callCertificateApiGeneric('/.netlify/functions/debriefing-pdf', {
+    token: St.authToken, emails: emailsRaw,
+    exName: ex.name, scenario: ex.scenario, meta, status: ex.status,
+    briefingFields, timeline,
+    stats: {
+      gesamtzeitText: formatDuration(stats.gesamtzeitSek),
+      avgDurationText: formatDuration(stats.avgDurationSek),
+      totalGesichtet: stats.totalGesichtet, correct: stats.correct, wrong: stats.wrong
+    }
+  });
+  St.debriefingMailBusy = false;
+  if(!r || !r.ok){ toast((r&&r.error)||'Fehler beim E-Mail-Versand'); render(); return; }
+  toast('Debriefing-PDF gesendet an: '+r.sentTo.join(', '));
+  render();
+}
+
+// ====================== COCKPIT-SCHNELLEINTRÄGE FÜRS DEBRIEFING ======================
+// Vorgegebene Buttons im Cockpit, mit denen der Übungsleiter/Admin während der laufenden
+// Übung wichtige Ereignisse mit Zeitstempel festhält. Diese landen automatisch (über
+// buildDebriefingTimeline) chronologisch zwischen den Sichtungsergebnissen im Debriefing.
+const COCKPIT_QUICK_EVENTS = [
+  'Durchsage: Alle Gehfähigen bitte mitkommen',
+  'Sichtungsschema nicht angewendet',
+  'Rückmeldung gegeben',
+  'Einsatzstichwort erhöht',
+  'Patient übersehen',
+  'Raum übersehen',
+  'Nicht richtig abgesucht'
+];
+
+async function logCockpitEvent(exId, eventText){
+  if(!eventText || !eventText.trim()) return;
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  ex.log = ex.log || [];
+  ex.log.push({event:eventText.trim(), time:nowStamp(), timeMs:Date.now()});
+  const ok = await saveKeyRetry('exercises', St.exercises);
+  if(!ok){ toast('Fehler: Eintrag konnte nicht gespeichert werden'); return; }
+  toast('Eintrag erfasst: '+eventText.trim());
+  render();
+}
+
+function openFreeEventModal(exId){
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Freie Eingabe</h2>
+      <p class="small">Dieser Text wird mit aktuellem Zeitstempel im Debriefing-Verlauf eingetragen.</p>
+      <div class="field"><label>Eintrag</label><textarea id="fe-text" rows="3" placeholder="z.B. Zusätzliche Kräfte nachgefordert"></textarea></div>
+      <button class="btn btn-primary" style="width:100%" onclick="logCockpitEvent('${exId}', document.getElementById('fe-text').value);closeModal();">Eintragen</button>
+    </div>
+  </div>`;
+  render();
+}
+
+// Setzt eine Übung auf "Anfangszustand" zurück: löscht alle Sichtungsergebnisse und den
+// gesamten Zeitverlauf (Start/Pause/Ende, Schnelleinträge) sowie die bisherige Teilnehmerliste,
+// behält aber alle Einstellungen der Übung selbst (Name, Szenario, Ort/Datum/Uhrzeit/Wetter,
+// Modus, Patientenauswahl, Krankenhäuser, Briefing-Angaben). So können die nächsten Teilnehmer
+// dieselbe Übung unbelastet von Vorgänger-Daten neu durchlaufen.
+async function resetExercise(exId){
+  const ex = St.exercises.find(e=>e.id===exId); if(!ex) return;
+  if(!confirm(`Übung "${ex.name}" wirklich zurücksetzen?\n\nAlle Sichtungsergebnisse und der komplette Zeitverlauf (Start/Pause/Ende, Schnelleinträge) werden UNWIDERRUFLICH gelöscht. Die Übung selbst mit allen Einstellungen bleibt erhalten.\n\nFortfahren?`)) return;
+  ex.status = 'entwurf';
+  ex.log = [];
+  ex.participants = {};
+  St.sichtungen[exId] = [];
+  const ok1 = await saveKeyRetry('exercises', St.exercises);
+  const ok2 = await saveKeyRetry('sichtungen_index', St.sichtungen);
+  if(!ok1 || !ok2){ toast('Fehler beim Zurücksetzen der Übung'); return; }
+  toast('Übung wurde zurückgesetzt – bereit für den nächsten Durchlauf');
+  render();
+}
+
+// ====================== TEILNAHMEZERTIFIKATE (nur Übungsleiter/Admin) ======================
+async function ensureCertData(){
+  if(!St.certRows || !St.certRows.length){
+    St.certRows = [{id:uid(), name:'', vorname:'', email:''}];
+  }
+  St.certTrainers = [];
+  if(St.authToken){
+    const r = await callAuthApi({action:'listTrainers', token:St.authToken});
+    if(r && r.ok) St.certTrainers = r.trainers;
+  }
+}
+
+// Liest die aktuell im DOM eingegebenen Werte aller Teilnehmerzeilen zurück in den
+// Zustand, BEVOR eine strukturelle Änderung (Zeile hinzufügen/entfernen) einen
+// kompletten Re-Render auslöst — sonst würden bereits eingetippte, aber noch nicht
+// "synchronisierte" Werte in anderen Zeilen beim Neuzeichnen verloren gehen.
+function syncCertRowsFromDom(){
+  (St.certRows||[]).forEach(r=>{
+    const n = document.getElementById('cert-name-'+r.id);
+    const v = document.getElementById('cert-vorname-'+r.id);
+    const e = document.getElementById('cert-email-'+r.id);
+    if(n) r.name = n.value;
+    if(v) r.vorname = v.value;
+    if(e) r.email = e.value;
   });
 }
 
-exports.handler = async function (event) {
-  if (event.httpMethod === "OPTIONS") return { statusCode: 200, headers, body: "" };
-  if (event.httpMethod !== "POST") return resp({ ok: false, error: "Nur POST erlaubt" });
+function duplicateCertRow(rowId){
+  syncCertRowsFromDom();
+  const idx = St.certRows.findIndex(r=>r.id===rowId);
+  if(idx===-1) return;
+  const src = St.certRows[idx];
+  const copy = {id:uid(), name:src.name, vorname:src.vorname, email:src.email};
+  St.certRows.splice(idx+1, 0, copy);
+  render();
+}
+function removeCertRow(rowId){
+  syncCertRowsFromDom();
+  if(St.certRows.length<=1){ toast('Mindestens eine Teilnehmerzeile muss bestehen bleiben'); return; }
+  St.certRows = St.certRows.filter(r=>r.id!==rowId);
+  render();
+}
 
-  const SECRET = process.env.SESSION_SECRET;
-  if (!SECRET) {
-    return resp({ ok: false, error: "Server nicht konfiguriert: SESSION_SECRET fehlt in den Netlify-Umgebungsvariablen." });
+function getCertFormValues(){
+  const getVal = id => { const el=document.getElementById(id); return el ? el.value.trim() : ''; };
+  const schemaSelect = getVal('cf-schema');
+  const schema = schemaSelect==='frei' ? getVal('cf-schema-frei') : schemaSelect;
+
+  const leiterSelect = getVal('cf-leiter-select');
+  let uebungsleiter = '', signaturId = '';
+  if(leiterSelect==='frei'){
+    uebungsleiter = getVal('cf-leiter-frei');
+  }else{
+    const t = (St.certTrainers||[]).find(x=>x.username===leiterSelect);
+    uebungsleiter = leiterSelect;
+    signaturId = t ? (t.signaturId||'') : '';
+  }
+  return {
+    uebungstag: getVal('cf-tag'), uebungsleiter, signaturId,
+    thema: getVal('cf-thema'), ue: getVal('cf-ue'), ort: getVal('cf-ort'),
+    schema
+  };
+}
+function onCertSchemaChange(){
+  const sel = document.getElementById('cf-schema');
+  const freiField = document.getElementById('cf-schema-frei-field');
+  if(freiField) freiField.style.display = (sel.value==='frei') ? '' : 'none';
+}
+function onCertLeiterChange(){
+  const sel = document.getElementById('cf-leiter-select');
+  const freiField = document.getElementById('cf-leiter-frei-field');
+  if(freiField) freiField.style.display = (sel.value==='frei') ? '' : 'none';
+}
+
+async function issueCertificate(rowId, mode){
+  syncCertRowsFromDom();
+  const row = St.certRows.find(r=>r.id===rowId); if(!row) return;
+  if(!row.name.trim() || !row.vorname.trim()){ toast('Bitte Name und Vorname des Teilnehmers angeben'); return; }
+  const form = getCertFormValues();
+  if(!form.uebungstag || !form.uebungsleiter || !form.thema || !form.ue || !form.ort || !form.schema){
+    toast('Bitte zuerst alle Felder oben im Formular ausfüllen (inkl. Sichtungsschema)'); return;
+  }
+  if(mode==='email' && !row.email.trim()){ toast('Bitte E-Mail-Adresse des Teilnehmers angeben'); return; }
+
+  const payload = { token: St.authToken, mode: mode==='email' ? 'email' : 'download',
+    name: row.name.trim(), vorname: row.vorname.trim(), email: row.email.trim(), ...form };
+
+  // WICHTIG: Bei "Ausgedruckt" muss das Fenster SOFORT und SYNCHRON beim Klick geöffnet
+  // werden (noch bevor auf die Server-Antwort gewartet wird) — sonst werten Browser das
+  // spätere window.open() nach dem "await" nicht mehr als direkte Nutzeraktion und
+  // blockieren es stillschweigend als Popup. Das war der Grund, warum "Ausdrucken" bisher
+  // nicht sichtbar funktionierte.
+  let printWin = null;
+  if(mode!=='email'){
+    printWin = window.open('', '_blank');
+    if(printWin){
+      printWin.document.write('<p style="font-family:sans-serif;padding:20px;">Zertifikat wird erstellt …</p>');
+    }
   }
 
-  let payload;
-  try { payload = JSON.parse(event.body || "{}"); } catch (e) { return resp({ ok: false, error: "Ungültiger Request-Body" }); }
-
-  const tokenData = verifyToken(payload.token, SECRET);
-  if (!tokenData || (tokenData.role !== "admin" && tokenData.role !== "uebungsleiter")) {
-    return resp({ ok: false, error: "Nicht angemeldet oder keine Berechtigung (nur Übungsleiter/Admin)." });
+  toast(mode==='email' ? 'Sende Zertifikat…' : 'Erzeuge Zertifikat…');
+  const r = await callCertificateApi(payload);
+  if(!r || !r.ok){
+    toast((r && r.error) || 'Fehler bei der Zertifikat-Erstellung');
+    if(printWin) printWin.close();
+    return;
   }
 
-  if (!payload.exName) return resp({ ok: false, error: "Fehlende Übungsdaten" });
-
-  const emails = parseEmailList(payload.emails);
-  if (!emails.length) {
-    return resp({ ok: false, error: "Bitte mindestens eine gültige E-Mail-Adresse angeben." });
+  if(mode==='email'){
+    toast('Zertifikat wurde an '+row.email+' gesendet');
+  }else{
+    // Base64-PDF in einen Blob umwandeln und im bereits geöffneten Tab anzeigen
+    try{
+      const byteChars = atob(r.pdfBase64);
+      const byteNumbers = new Array(byteChars.length);
+      for(let i=0;i<byteChars.length;i++) byteNumbers[i] = byteChars.charCodeAt(i);
+      const blob = new Blob([new Uint8Array(byteNumbers)], {type:'application/pdf'});
+      const url = URL.createObjectURL(blob);
+      if(printWin){
+        printWin.location.href = url;
+        toast('Zertifikat erzeugt – im geöffneten Tab drucken/speichern');
+      }else{
+        // Fenster wurde trotzdem blockiert (z.B. strikte Browser-/Erweiterungs-Einstellung):
+        // sichtbaren Link als Fallback anbieten, statt stillschweigend nichts zu tun.
+        modalHtml = `
+        <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+          <div class="modal">
+            <span class="close-x" onclick="closeModal()">✕</span>
+            <h2>Popup wurde blockiert</h2>
+            <p class="small">Dein Browser hat das automatische Öffnen verhindert. Klicke auf den Link, um das Zertifikat anzuzeigen:</p>
+            <a href="${url}" target="_blank" class="btn btn-primary" style="width:100%;text-align:center;display:block;">📄 Zertifikat öffnen</a>
+          </div>
+        </div>`;
+        render();
+      }
+    }catch(e){
+      toast('Fehler beim Öffnen des PDFs: '+e.message);
+      if(printWin) printWin.close();
+    }
   }
-  if (!EMAIL_CONFIGURED) {
-    return resp({ ok: false, error: "Mailversand ist serverseitig nicht konfiguriert (GMAIL_USER/GMAIL_APP_PASSWORD fehlen)." });
-  }
+}
 
-  let pdfBuffer;
-  try {
-    pdfBuffer = await buildDebriefingPdf(payload);
-  } catch (e) {
-    return resp({ ok: false, error: "Fehler bei der PDF-Erstellung: " + e.message });
-  }
+function viewCertificates(){
+  if(!St.certRows || !St.certRows.length){ St.certRows = [{id:uid(), name:'', vorname:'', email:''}]; }
+  const defaultThema = 'ManV-Sichtungsübung nach dem mSTaRT Sichtungsschema';
+  const defaultTag = new Date().toISOString().slice(0,10);
+  const trainers = St.certTrainers || [];
+  const currentUsername = St.user ? St.user.username : '';
 
-  try {
-    const t = getTransporter();
-    await t.sendMail({
-      from: `"mSTaRT Sichtungstrainer" <${process.env.GMAIL_USER}>`,
-      to: emails.join(","),
-      subject: `Debriefing-Bericht: ${payload.exName}`,
-      html: `<p>Anbei der Debriefing-Bericht zur Übung "${payload.exName}".</p>`,
-      attachments: [{ filename: `Debriefing_${payload.exName}.pdf`.replace(/[^a-zA-Z0-9_\-.]/g, "_"), content: pdfBuffer, contentType: "application/pdf" }]
+  const rows = St.certRows.map(r=>`
+    <tr>
+      <td><input id="cert-name-${r.id}" value="${(r.name||'').replace(/"/g,'&quot;')}" placeholder="Nachname"></td>
+      <td><input id="cert-vorname-${r.id}" value="${(r.vorname||'').replace(/"/g,'&quot;')}" placeholder="Vorname"></td>
+      <td><input id="cert-email-${r.id}" type="email" value="${(r.email||'').replace(/"/g,'&quot;')}" placeholder="E-Mail (für Versand)"></td>
+      <td style="white-space:nowrap;">
+        <button class="btn btn-sm btn-primary" onclick="issueCertificate('${r.id}','email')">📧 Per E-Mail</button>
+        <button class="btn btn-sm" onclick="issueCertificate('${r.id}','print')">🖨 Ausgedruckt</button>
+        <button class="btn btn-sm" onclick="duplicateCertRow('${r.id}')">+ Nächster Teilnehmer</button>
+        <button class="btn btn-sm btn-danger" onclick="removeCertRow('${r.id}')">✕</button>
+      </td>
+    </tr>`).join('');
+
+  return `
+    <div class="card" style="border-left:5px solid var(--yellow);">
+      <div class="small" style="letter-spacing:.12em;text-transform:uppercase;color:var(--navy);font-weight:800;">🎓 Teilnahmezertifikate</div>
+      <h1 style="margin-top:4px;">Zertifikate erstellen</h1>
+      <p class="small">Diese Angaben gelten für ALLE unten erzeugten Zertifikate dieser Sitzung.</p>
+
+      <div class="row">
+        <div class="field"><label>Übungstag</label><input id="cf-tag" type="date" value="${defaultTag}"></div>
+        <div class="field">
+          <label>Übungsleiter/in auswählen</label>
+          <select id="cf-leiter-select" onchange="onCertLeiterChange()">
+            ${trainers.map(t=>`<option value="${t.username}" ${t.username===currentUsername?'selected':''}>${t.username} (${t.role})${t.signaturId?' — Signatur '+t.signaturId:' — keine Signatur hinterlegt'}</option>`).join('')}
+            <option value="frei" ${!trainers.length?'selected':''}>Andere Person (freie Eingabe)…</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" id="cf-leiter-frei-field" style="display:${trainers.length?'none':''};">
+        <div class="field"><label>Name Übungsleiter/in</label><input id="cf-leiter-frei" placeholder="Vor- und Nachname"></div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Verwendetes Sichtungsschema</label>
+          <select id="cf-schema" onchange="onCertSchemaChange()">
+            <option value="mSTaRT" selected>mSTaRT</option>
+            <option value="PRIOR">PRIOR</option>
+            <option value="STaRT">STaRT</option>
+            <option value="Modell Bayern">Modell Bayern</option>
+            <option value="mSTaRT Kinder">mSTaRT Kinder</option>
+            <option value="frei">Freie Eingabe…</option>
+          </select>
+        </div>
+        <div class="field" id="cf-schema-frei-field" style="display:none;">
+          <label>Eigene Bezeichnung</label>
+          <input id="cf-schema-frei" placeholder="z.B. eigenes Sichtungsschema">
+        </div>
+      </div>
+      <div class="field"><label>Thema der Übung</label><input id="cf-thema" value="${defaultThema.replace(/"/g,'&quot;')}"></div>
+      <div class="row">
+        <div class="field"><label>Unterrichtseinheiten</label><input id="cf-ue" placeholder="z.B. 4" value="4"></div>
+        <div class="field"><label>Übungsort</label><input id="cf-ort" value=""></div>
+      </div>
+
+      <div class="section-title">Teilnehmer</div>
+      <table><thead><tr><th>Name</th><th>Vorname</th><th>E-Mail</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table>
+
+      <p class="small">"Per E-Mail" sendet das fertige PDF direkt an die angegebene Adresse (erfordert eingerichteten
+        Mailversand, siehe DEPLOYMENT.md). "Ausgedruckt" öffnet das PDF in einem neuen Tab zum Ansehen/Drucken/Speichern.
+        Das Zertifikat enthält unten Ort/Datum sowie eine Unterschriftslinie für den Übungsleiter zum eigenhändigen Unterschreiben.</p>
+    </div>`;
+}
+
+function viewCockpit(){
+  const ex = St.exercises.find(e=>e.id===St.currentExerciseId);
+  if(!ex) return `<div class="wrap"><p>Keine Übung ausgewählt.</p></div>`;
+  const list = (St.sichtungen[ex.id]||[]).slice().sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
+  const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+  const hospChips = (ex.krankenhaeuser||[]).map(h=>`<span class="chip">🏥 ${h.name} · ${h.km} km</span>`).join('') || '<span class="small">Keine hinterlegt</span>';
+  const rows = list.map(r=>{
+    const p = St.patients.find(pp=>pp.id===r.patientId);
+    const match = r.kategorie && p && p.kategorieReal===r.kategorie;
+    const hosp = r.krankenhausId ? (ex.krankenhaeuser||[]).find(h=>h.id===r.krankenhausId) : null;
+    return `<tr>
+      <td>${r.timestamp}</td>
+      <td>${r.username}</td>
+      <td><span class="badge-role">${r.role}</span></td>
+      <td>#${r.patientId}</td>
+      <td>${r.kategorie ? `<span class="tag tag-${r.kategorie}">${CAT_LABEL[r.kategorie]}</span>` : '<span class="small">noch keine Sichtung</span>'}</td>
+      <td>${p?`<span class="tag tag-${p.kategorieReal}">${CAT_LABEL[p.kategorieReal]}</span>`:'-'}</td>
+      <td>${r.kategorie ? (match?'<span class="match-ok">✓ stimmt überein</span>':'<span class="match-bad">✕ weicht ab</span>') : '-'}</td>
+      <td>${hosp?`🏥 ${hosp.name}`:'-'}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="8" class="empty">Noch keine Sichtungen</td></tr>`;
+
+  return `
+  <div class="wrap">
+    <div class="flex-between">
+      <div><h1>Übungsleiter-Cockpit</h1><p>${ex.name} · ${ex.scenario||''}</p>
+      ${meta?`<p class="small">${meta}</p>`:''}
+      </div>
+      <span class="tag tag-status">${ex.status}</span>
+    </div>
+    <div class="card">
+      <div class="section-title" style="margin-top:0;">Nächstgelegene Krankenhäuser</div>
+      ${hospChips}
+    </div>
+    <div class="card">
+      <div class="section-title" style="margin-top:0;">Schnelleinträge fürs Debriefing</div>
+      <p class="small">Erzeugt sofort einen Zeitstempel-Eintrag, der später im Debriefing chronologisch zwischen den Sichtungsergebnissen erscheint.</p>
+      <div class="row" style="flex-wrap:wrap;gap:8px;">
+        ${COCKPIT_QUICK_EVENTS.map(txt=>`<button class="btn btn-sm" onclick="logCockpitEvent('${ex.id}', '${txt.replace(/'/g,"\\'")}')">${txt}</button>`).join('')}
+        <button class="btn btn-sm btn-primary" onclick="openFreeEventModal('${ex.id}')">✏️ Freie Eingabe</button>
+      </div>
+    </div>
+    <div class="row" style="margin:14px 0;">
+      <button class="btn btn-primary" onclick="St.currentExerciseId='${ex.id}';go('briefing')">📋 Briefing</button>
+      <button class="btn btn-primary" onclick="setExerciseStatus('${ex.id}','läuft')">▶ Starten</button>
+      <button class="btn" onclick="setExerciseStatus('${ex.id}','pausiert')">⏸ Pausieren</button>
+      <button class="btn btn-danger" onclick="setExerciseStatus('${ex.id}','beendet')">⏹ Beenden</button>
+      <button class="btn" onclick="St.currentExerciseId='${ex.id}';go('debriefing')">🧾 Debriefing</button>
+      <button class="btn" onclick="exportExercisePdf('${ex.id}')">📄 PDF-Bericht erzeugen</button>
+      <button class="btn" onclick="openExerciseEditModal('${ex.id}')">⚙ Übung bearbeiten</button>
+      <button class="btn btn-danger" onclick="resetExercise('${ex.id}')">🔄 Zurücksetzen</button>
+    </div>
+    <div class="card">
+      <p>Gesichtete Patienten: <b>${list.filter(r=>r.kategorie).length}</b> von ${(ex.patientIds&&ex.patientIds.length)?ex.patientIds.length:St.patients.length}${ex.modus==='qr'?' (Planwert: '+(ex.patientCount||'-')+')':''}</p>
+      ${ex.modus==='qr' ? `<p class="small">QR-Modus: Es zählen automatisch alle Patienten, deren QR-Code tatsächlich gescannt wurde — unabhängig vom oben eingestellten Planwert.</p>` : ''}
+      <table><thead><tr><th>Zeit</th><th>Teilnehmer</th><th>Rolle</th><th>Patient</th>
+        <th>Gesichtet mit</th><th>Reale Kategorie</th><th>Abgleich</th><th>Krankenhaus</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+    </div>
+  </div>`;
+}
+
+/* ====================== RENDER: ADMIN ====================== */
+function viewAdmin(){
+  const tabs = ['patienten','nutzer','uebungen','zertifikate'];
+  const tabLabels = {patienten:'Patientendatenbank', nutzer:'Nutzerübersicht', uebungen:'Übungen', zertifikate:'Zertifikate'};
+  const tabBar = tabs.map(t=>`<div class="tab ${St.adminTab===t?'active':''}" onclick="goAdminTab('${t}')">${tabLabels[t]}</div>`).join('');
+  let content = '';
+  if(St.adminTab==='patienten') content = adminPatients();
+  if(St.adminTab==='nutzer') content = adminUsers();
+  if(St.adminTab==='uebungen') content = adminExercises();
+  if(St.adminTab==='zertifikate') content = viewCertificates();
+  return `<div class="wrap"><h1>Admin-Bereich</h1><div class="tabs">${tabBar}</div>${content}</div>`;
+}
+
+function openChangeIdModal(pid){
+  const p = St.patients.find(x=>x.id===pid); if(!p) return;
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>ID ändern für ${p.vorname} ${p.nachname}</h2>
+      <p class="small">Diese ID bestimmt, welcher fest ausgedruckte QR-Code diesem Patienten zugeordnet ist.
+        Sie muss eindeutig sein (kein anderer Patient darf dieselbe ID tragen).</p>
+      <div class="field"><label>Neue ID</label><input id="cid-new" type="number" value="${p.id}" min="1"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="changePatientId(${p.id}, parseInt(document.getElementById('cid-new').value))">ID übernehmen</button>
+    </div>
+  </div>`;
+  render();
+}
+async function changePatientId(oldId, newId){
+  if(!newId || newId<1 || !Number.isInteger(newId)){ toast('Bitte eine gültige positive Ganzzahl eingeben'); return; }
+  if(newId===oldId){ closeModal(); return; }
+  if(St.patients.some(p=>p.id===newId)){ toast(`ID #${newId} ist bereits vergeben — bitte eine andere wählen`); return; }
+  const p = St.patients.find(x=>x.id===oldId); if(!p) return;
+  p.id = newId;
+  // Bereits erfasste Sichtungsergebnisse für die alte ID auf die neue ID ummappen,
+  // damit keine Historie verloren geht bzw. auf einen falschen Patienten zeigt.
+  Object.keys(St.sichtungen).forEach(exId=>{
+    (St.sichtungen[exId]||[]).forEach(rec=>{
+      if(rec.patientId===oldId) rec.patientId = newId;
     });
-    return resp({ ok: true, sentTo: emails });
-  } catch (e) {
-    return resp({ ok: false, error: "Fehler beim E-Mail-Versand: " + e.message });
-  }
+  });
+  await saveKey('patients', St.patients);
+  await saveKey('sichtungen_index', St.sichtungen);
+  toast(`ID geändert: #${oldId} → #${newId}`);
+  closeModal();
+}
+
+function adminPatients(){
+  const genBox = `
+  <div class="card">
+    <h3>Zusätzliche Patienten per KI generieren (nur Admin)</h3>
+    <p class="small">Die 100 Standardpatienten der Datenbank bleiben davon unberührt — hiermit werden ausschließlich
+      weitere, zusätzliche Patienten ergänzt (nichts wird ersetzt oder gelöscht).</p>
+    <div class="row">
+      <div class="field"><label>Anzahl</label><input id="ai-count" type="number" value="6" min="1" max="100"></div>
+      <div class="field" style="flex:2;"><label>Szenario</label><input id="ai-scenario" placeholder="z.B. Explosion mit Einsturz"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>% Rot/Blau/Schwarz</label><input id="ai-rot" type="number" value="34"></div>
+      <div class="field"><label>% Gelb</label><input id="ai-gelb" type="number" value="33"></div>
+      <div class="field"><label>% Grün</label><input id="ai-gruen" type="number" value="33"></div>
+    </div>
+    <button class="btn btn-primary" ${St.aiBusy?'disabled':''} onclick="generatePatientsAI(
+      parseInt(document.getElementById('ai-count').value),
+      document.getElementById('ai-scenario').value,
+      document.getElementById('ai-rot').value,
+      document.getElementById('ai-gelb').value,
+      document.getElementById('ai-gruen').value)">
+      ${St.aiBusy? 'Generiere…' : 'Zusätzliche Patienten generieren'}
+    </button>
+    ${St.aiBusy?`<p class="small">${St.aiProgress}</p>`:''}
+    ${(!St.aiBusy && St.aiLastError)?`<div class="value-box" style="border-color:var(--red);"><div class="lbl" style="color:var(--red)">Letzter Fehler bei der Generierung</div><div class="val" style="font-family:monospace;font-size:.82rem;word-break:break-word;">${St.aiLastError}</div></div>`:''}
+    <p class="small">Hinweis: aus API-Limits werden Patienten in kleinen Chargen erzeugt, das kann bei großen Mengen etwas dauern.</p>
+    <p class="small">Feste Altersverteilung je Lauf: 5% Baby, 5% Kleinkind, 5% Schulkind, 85% Erwachsene. Feste Namensherkunft: 10% ausländisch, 90% deutsch.</p>
+    <div class="divider"></div>
+    <p class="small"><b>100 Standardpatienten neu erzeugen:</b> ersetzt die komplette aktuelle Patientendatenbank
+      durch 100 frisch erzeugte Standardpatienten mit größerer Vorlagenvielfalt (nützlich, falls die aktuelle
+      Datenbank noch aus einer älteren Version mit ähnlicheren Verletzungsbildern stammt).</p>
+    <button class="btn btn-danger" onclick="regenerateDefault100()">🔄 100 Standardpatienten neu erzeugen (ersetzt alle)</button>
+  </div>`;
+
+  const qrBox = `
+  <div class="card">
+    <h3>QR-Codes zum Sichten</h3>
+    <p class="small">Jede ID hat einen festen QR-Code — unabhängig von einer bestimmten Übung. Einmal ausdrucken
+      und beliebig oft wiederverwenden: Welcher Patient hinter einer ID steckt, legst du unten in der Tabelle über
+      die ID-Spalte fest (Standard: fortlaufend 1–${St.patients.length}).</p>
+    <button class="btn btn-primary" ${!St.patients.length?'disabled':''} onclick="exportQrPdf(null)">📄 PDF mit allen QR-Codes erzeugen (1 pro Seite)</button>
+  </div>`;
+
+  const rows = St.patients.map(p=>`
+    <tr>
+      <td>#${p.id}</td>
+      <td>${p.vorname} ${p.nachname}</td>
+      <td>${p.alter}</td>
+      <td>${p.geschlecht}</td>
+      <td><span class="tag tag-${p.kategorieReal}">${CAT_LABEL[p.kategorieReal]}</span></td>
+      <td><span class="small">${(p.typ||'trauma')==='erkrankung'?'Erkrankung':'Trauma'}</span></td>
+      <td><button class="btn btn-sm" onclick="openPatientEdit(${p.id})">Bearbeiten</button>
+      <button class="btn btn-sm" onclick="openChangeIdModal(${p.id})">ID ändern</button>
+      <button class="btn btn-sm" onclick="showPatientQr(${p.id})">QR-Code</button>
+      <button class="btn btn-sm btn-danger" onclick="deletePatient(${p.id})">Löschen</button></td>
+    </tr>`).join('') || `<tr><td colspan="7" class="empty">Keine Patienten</td></tr>`;
+
+  return `${genBox}${qrBox}
+  <div class="card">
+    <h3>Patienten (${St.patients.length})</h3>
+    <table><thead><tr><th>ID</th><th>Name</th><th>Alter</th><th>Geschlecht</th><th>Kategorie</th><th>Ereignisart</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table>
+  </div>`;
+}
+
+const EDIT_SCHEMA = {
+  koerper: {label:'Körperstatus', fields:{kopf:'Kopf', thoraxVorne:'Thorax vorne', thoraxHinten:'Thorax hinten',
+    armLinks:'Arm links', armRechts:'Arm rechts', beinLinks:'Bein links', beinRechts:'Bein rechts'}},
+  xabcde: {label:'X-ABCDE-Schema', fields:{X:'X – Kritische Blutung', A:'A – Atemweg', B:'B – Atmung',
+    C:'C – Kreislauf', D:'D – Bewusstsein/Defizit', E:'E – Exposition/Umgebung'}},
+  sampler: {label:'SAMPLER-Schema', fields:{S:'S – Symptome', A:'A – Allergien', M:'M – Medikamente',
+    P:'P – Patientengeschichte', L:'L – Letzte Mahlzeit', E:'E – Ereignis', R:'R – Risikofaktoren'}},
+  vitals: {label:'Messwerte', fields:{puls:'Puls', blutdruck:'Blutdruck', rekap:'ReKap-Zeit', af:'Atemfrequenz',
+    spo2:'SpO2', bz:'Blutzucker', temp:'Temperatur', etco2:'etCO2', hb:'Hb', co:'CO', spmet:'SpMet'}},
+  scores: {label:'Klinische Scores', fields:{gcs:'GCS', befast:'BE-FAST', news2:'NEWS2', nexus:'NEXUS-Kriterien',
+    qsofa:'qSOFA', spesi:'sPESI', wells:'Wells-Score', apgar:'APGAR'}}
 };
+
+function editInput(id, label, value, multiline){
+  const v = (value===undefined||value===null) ? '' : String(value).replace(/"/g,'&quot;');
+  if(multiline){
+    return `<div class="field"><label>${label}</label><textarea id="${id}" rows="2">${v}</textarea></div>`;
+  }
+  return `<div class="field"><label>${label}</label><input id="${id}" value="${v}"></div>`;
+}
+
+function openPatientEdit(pid){
+  const p = St.patients.find(x=>x.id===pid);
+  let groupsHtml = '';
+  Object.keys(EDIT_SCHEMA).forEach(group=>{
+    const def = EDIT_SCHEMA[group];
+    const fieldsHtml = Object.keys(def.fields).map(key=>
+      editInput(`pe__${group}__${key}`, def.fields[key], p[group][key])
+    ).join('');
+    groupsHtml += `<div class="section-title">${def.label}</div>${fieldsHtml}`;
+  });
+
+  modalHtml = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="max-width:560px;">
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>Patient #${p.id} bearbeiten</h2>
+
+      <div class="section-title">Basisdaten</div>
+      ${editInput('pe__basis__vorname','Vorname',p.vorname)}
+      ${editInput('pe__basis__nachname','Nachname',p.nachname)}
+      <div class="row">
+        ${editInput('pe__basis__alter','Alter',p.alter)}
+        ${editInput('pe__basis__geschlecht','Geschlecht',p.geschlecht)}
+      </div>
+      ${editInput('pe__basis__ersteindruck','Ersteindruck',p.ersteindruck,true)}
+      ${editInput('pe__basis__gehfaehigkeit','Gehfähigkeit / Mobilität',p.gehfaehigkeit)}
+      ${editInput('pe__basis__befunde','Offensichtliche Beobachtungen / äußere Befunde',p.befunde,true)}
+      <div class="field"><label>Reale Sichtungskategorie</label>
+        <select id="pe__basis__kategorieReal">${CATS.map(c=>`<option value="${c}" ${p.kategorieReal===c?'selected':''}>${CAT_LABEL[c]}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Ereignisart (für Szenario-Zuordnung bei Übungen)</label>
+        <select id="pe__basis__typ">
+          <option value="trauma" ${(p.typ||'trauma')==='trauma'?'selected':''}>Trauma / Verletzung</option>
+          <option value="erkrankung" ${p.typ==='erkrankung'?'selected':''}>Erkrankung / Infektion</option>
+        </select>
+      </div>
+
+      ${groupsHtml}
+
+      <button class="btn btn-primary" style="width:100%;margin-top:10px;" onclick="collectAndSavePatient(${p.id});closeModal();">Alle Änderungen speichern</button>
+    </div>
+  </div>`;
+  render();
+}
+
+async function collectAndSavePatient(pid){
+  const p = St.patients.find(x=>x.id===pid); if(!p) return;
+  const getVal = (id)=>{ const el = document.getElementById(id); return el ? el.value : ''; };
+
+  p.vorname = getVal('pe__basis__vorname');
+  p.nachname = getVal('pe__basis__nachname');
+  p.alter = parseInt(getVal('pe__basis__alter')) || 0;
+  p.geschlecht = getVal('pe__basis__geschlecht');
+  p.ersteindruck = getVal('pe__basis__ersteindruck');
+  p.gehfaehigkeit = getVal('pe__basis__gehfaehigkeit');
+  p.befunde = getVal('pe__basis__befunde');
+  p.kategorieReal = getVal('pe__basis__kategorieReal');
+  p.typ = getVal('pe__basis__typ');
+
+  Object.keys(EDIT_SCHEMA).forEach(group=>{
+    const def = EDIT_SCHEMA[group];
+    Object.keys(def.fields).forEach(key=>{
+      p[group][key] = getVal(`pe__${group}__${key}`);
+    });
+  });
+
+  await saveKey('patients', St.patients);
+  toast('Patient gespeichert');
+  render();
+}
+
+function adminUsers(){
+  const rows = Object.values(St.users).map(u=>{
+    const isSelf = St.user && St.user.username===u.username;
+    return `
+    <tr>
+      <td>${u.username}${isSelf?' <span class="small">(du)</span>':''}</td>
+      <td>${u.email}</td>
+      <td>${u.lastLogin||'nie'}</td>
+      <td>
+        <select onchange="assignRole('${u.username}', this.value)" ${isSelf?'disabled':''}>
+          ${['teilnehmer','uebungsleiter','admin'].map(r=>`<option value="${r}" ${u.role===r?'selected':''}>${r}</option>`).join('')}
+        </select>
+      </td>
+      <td>${u.locked?'<span class="tag tag-rot">gesperrt</span>':'<span class="tag tag-gruen">aktiv</span>'}</td>
+      <td>
+        <button class="btn btn-sm" onclick="openEditUserModal('${u.username}')">Ändern</button>
+        <button class="btn btn-sm" ${isSelf?'disabled':''} onclick="toggleLock('${u.username}')">${u.locked?'Entsperren':'Sperren'}</button>
+        <button class="btn btn-sm" onclick="openSetPasswordModal('${u.username}')">Passwort setzen</button>
+        ${(!isSelf && u.username!==PROTECTED_ADMIN_USERNAME)?`<button class="btn btn-sm btn-danger" onclick="deleteUser('${u.username}')">Löschen</button>`:''}
+      </td>
+    </tr>`;
+  }).join('');
+  return `
+  <div class="card">
+    <div class="flex-between">
+      <div class="field" style="flex:1;margin-bottom:0;"><label>Suche</label><input id="user-search" oninput="filterUsers()" placeholder="Benutzername oder E-Mail"></div>
+      <button class="btn btn-primary" style="flex:0 0 auto;" onclick="openCreateUserModal()">+ Neuer Nutzer</button>
+    </div>
+    <table id="user-table" style="margin-top:14px;"><thead><tr><th>Benutzer</th><th>E-Mail</th><th>Letzte Anmeldung</th><th>Rolle</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table>
+  </div>`;
+}
+function filterUsers(){
+  const q = document.getElementById('user-search').value.toLowerCase();
+  document.querySelectorAll('#user-table tbody tr').forEach(tr=>{
+    tr.style.display = tr.innerText.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+
+function adminExercises(){
+  const rows = St.exercises.map(ex=>{
+    const count = (St.sichtungen[ex.id]||[]).length;
+    const meta = [ex.ort, ex.datum, ex.uhrzeit, ex.wetter].filter(Boolean).join(' · ');
+    return `<div class="card">
+      <div class="flex-between">
+        <div>
+          <h3>${ex.name} <span class="tag tag-status">${ex.status}</span> <span class="tag tag-status">${ex.modus==='liste'?'📋 mit Übersicht':'📷 QR-Scan'}</span></h3>
+          <p>${ex.scenario||''}</p>
+          ${meta?`<p class="small">${meta}</p>`:''}
+          <p class="small">Leitung: ${ex.createdBy} · ${count} Sichtungen erfasst · ${(ex.krankenhaeuser||[]).length} Krankenhäuser hinterlegt</p>
+        </div>
+        <div class="row" style="flex:0 0 auto;">
+          <button class="btn btn-sm" onclick="St.currentExerciseId='${ex.id}';go('cockpit')">Cockpit</button>
+          <button class="btn btn-sm" onclick="openExerciseEditModal('${ex.id}')">Bearbeiten</button>
+          <button class="btn btn-sm btn-danger" onclick="if(confirm('Übung \'${ex.name}\' wirklich löschen?')){deleteExercise('${ex.id}');}">Löschen</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('') || '<div class="empty">Keine Übungen</div>';
+  return `<div class="flex-between"><h3 style="margin:0;">Alle Übungen</h3>
+    <button class="btn btn-primary" onclick="openCreateExerciseModal()">+ Neue Übung</button></div>
+    <div style="margin-top:12px;">${rows}</div>`;
+}
+
+/* ====================== MAIN RENDER ====================== */
+function render(){
+  const el = document.getElementById('app');
+  let body = '';
+  if(St.resetToken){
+    // Hat Vorrang vor allem anderen: ein Reset-Link funktioniert unabhängig davon,
+    // ob gerade jemand eingeloggt ist oder nicht.
+    body = viewResetPassword();
+  }else if(!St.user){
+    if(St.route==='setup') body = viewSetup();
+    else if(St.route==='register') body = viewRegister();
+    else if(St.route==='registerPending') body = viewRegisterPending();
+    else if(St.route==='forgotPassword') body = viewForgotPassword();
+    else body = viewLogin();
+  }else{
+    // Zusätzliche Absicherung: Admin-Bereich (inkl. KI-Patientengenerierung) ist
+    // ausschließlich für die Rolle "admin" zugänglich, auch wenn St.route manuell
+    // (z.B. über die Browser-Konsole) auf 'admin' gesetzt würde.
+    if(St.route==='admin' && St.user.role!=='admin'){ St.route='exercises'; }
+    // Im QR-Scan-Modus (Variante 1) ist die Patientenübersicht grundsätzlich nicht erreichbar —
+    // Teilnehmer gelangen ausschließlich über das Scannen der QR-Codes zu einem Patienten.
+    if(St.route==='patients'){
+      const curEx = St.exercises.find(e=>e.id===St.currentExerciseId);
+      if(curEx && (curEx.modus||'qr')==='qr'){ St.route='depesche'; }
+    }
+    body = topbar();
+    if(St.route==='exercises') body += (St.user.role==='uebungsleiter') ? viewLeiterHome() : viewExercises();
+    else if(St.route==='depesche') body += viewBriefing();
+    else if(St.route==='patients') body += viewPatients();
+    else if(St.route==='sichtung') body += viewSichtung();
+    else if(St.route==='cockpit') body += viewCockpit();
+    else if(St.route==='briefing') body += viewTrainerBriefing();
+    else if(St.route==='debriefing') body += viewDebriefing();
+    else if(St.route==='certificates') body += viewCertificates();
+    else if(St.route==='admin') body += viewAdmin();
+    else body += viewExercises();
+  }
+  el.innerHTML = body + modalHtml;
+}
+
+init();
+</script>
+</body>
+</html>
